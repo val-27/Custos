@@ -316,10 +316,18 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     #[cfg(not(target_os = "linux"))]
     {
-        socket_fd = 999; // Mock file descriptor
+        // SAFETY: `memfd` is an open descriptor created above; dup gives the worker a
+        // valid placeholder descriptor for development SCM_RIGHTS handshakes.
+        socket_fd = unsafe { libc::dup(memfd) };
+        if socket_fd < 0 {
+            return Err(io::Error::last_os_error().into());
+        }
         _umem_ptr = ptr::null_mut();
         _socket_ptr = ptr::null_mut();
-        info!("Running on non-Linux OS. Stubbing AF_XDP socket creation (mock FD 999)");
+        info!(
+            "Running on non-Linux OS. Stubbing AF_XDP socket creation with FD {}",
+            socket_fd
+        );
     }
 
     // Set up Unix Domain Socket for passing FDs
