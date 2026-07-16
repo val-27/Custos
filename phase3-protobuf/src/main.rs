@@ -110,24 +110,25 @@ fn main() -> Result<(), Box<dyn Error>> {
         let content = std::fs::read_to_string(config_path)?;
         let toml_config: ValidationConfig = toml::from_str(&content)?;
         config = toml_config;
-    } else {
-        // Apply CLI overrides if provided
-        if let Some(port) = args.target_port {
-            config.target_port = port;
-        }
-        if let Some(field) = args.shape_field {
-            config.shape_field_number = field;
-        }
-        if let Some(dims) = args.max_dims {
-            config.max_dimensions = dims;
-        }
-        if let Some(elements) = args.max_elements {
-            config.max_tensor_elements = elements;
-        }
-        if let Some(depth) = args.max_depth {
-            config.max_recursion_depth = depth;
-        }
     }
+
+    // CLI overrides take precedence over TOML values
+    if let Some(port) = args.target_port {
+        config.target_port = port;
+    }
+    if let Some(field) = args.shape_field {
+        config.shape_field_number = field;
+    }
+    if let Some(dims) = args.max_dims {
+        config.max_dimensions = dims;
+    }
+    if let Some(elements) = args.max_elements {
+        config.max_tensor_elements = elements;
+    }
+    if let Some(depth) = args.max_depth {
+        config.max_recursion_depth = depth;
+    }
+
     info!("Effective Validation Rules: {:?}", config);
 
     // 2. Thread Pinning
