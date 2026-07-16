@@ -14,13 +14,14 @@ custos-common = { workspace = true }
 
 [dev-dependencies]
 xsk-rs = { workspace = true }
+custos-grpc-basic = { path = "phase2-grpc-basic" }
 
 [workspace]
 resolver = "2"
 members = [
     "common",
     "phase1-echo",
-    "grpc-basic",
+    "phase2-grpc-basic",
     "protobuf",
 ]
 

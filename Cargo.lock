@@ -208,6 +208,7 @@ dependencies = [
  "bytemuck",
  "clap",
  "custos-common",
+ "custos-grpc-basic",
  "libc",
  "tracing",
  "tracing-subscriber",
@@ -235,6 +236,7 @@ dependencies = [
  "libc",
  "tracing",
  "tracing-subscriber",
+ "xsk-rs",
  "zerocopy",
 ]
 

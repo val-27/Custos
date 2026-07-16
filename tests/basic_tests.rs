@@ -80,9 +80,9 @@ fn test_af_xdp_echo_and_leak_detection() {
         unsafe { Socket::new(SocketConfig::default(), &umem_dev1, &if_dev1, 0) }.unwrap();
     let (mut fq_dev1, mut cq_dev1) = fq_and_cq_dev1.unwrap();
 
-    // Populate Fill Queue for Dev1 (needed to receive the echoed packet back)
-    let produced_dev1 = unsafe { fq_dev1.produce(&frame_descs_dev1) };
-    assert_eq!(produced_dev1, frame_count as usize);
+    // Populate Fill Queue for Dev1 (excluding frame 0, reserved for TX)
+    let produced_dev1 = unsafe { fq_dev1.produce(&frame_descs_dev1[1..]) };
+    assert_eq!(produced_dev1, (frame_count - 1) as usize);
 
     // 5. Construct a test UDP packet in dev1's UMEM frame 0
     let mut pkt_data = [0u8; 64];
@@ -110,21 +110,32 @@ fn test_af_xdp_echo_and_leak_detection() {
         tx_q_dev1.wakeup().unwrap();
     }
 
-    // 7. Receive on Dev0, swap MACs, and Echo back
+    // 7. Receive on Dev0, filter out background noise, and Echo back
     let mut rx_descs = vec![frame_descs_dev0[0]; 16];
     let mut tx_descs = rx_descs.clone();
 
-    let mut received = 0;
+    let mut target_desc = None;
     let start = Instant::now();
-    while received == 0 && start.elapsed() < Duration::from_secs(4) {
-        received = unsafe { rx_q_dev0.consume(&mut rx_descs[..]) };
+    while target_desc.is_none() && start.elapsed() < Duration::from_secs(4) {
+        let received = unsafe { rx_q_dev0.consume(&mut rx_descs[..]) };
+        for desc in rx_descs.iter().take(received) {
+            let data = unsafe { umem_dev0.data(desc) };
+            let contents = data.contents();
+            // Match our unique source MAC address
+            if contents.len() >= 12 && &contents[6..12] == &[0x02, 0x00, 0x00, 0x00, 0x00, 0x01] {
+                target_desc = Some(*desc);
+                break;
+            } else {
+                // Recycle background non-target packets immediately
+                unsafe { fq_dev0.produce(std::slice::from_ref(desc)); }
+            }
+        }
     }
-    assert_eq!(received, 1, "Dev0 failed to receive the injected packet");
+    let mut desc = target_desc.expect("Dev0 failed to receive the injected packet");
 
     // Verify received frame address maps to expected range and perform swap
     {
-        let desc = &mut rx_descs[0];
-        let mut data_mut = unsafe { umem_dev0.data_mut(desc) };
+        let mut data_mut = unsafe { umem_dev0.data_mut(&mut desc) };
         let contents = data_mut.contents_mut();
         assert!(contents.len() >= 12);
 
@@ -136,7 +147,7 @@ fn test_af_xdp_echo_and_leak_detection() {
         contents[0..6].copy_from_slice(&mac_src);
         contents[6..12].copy_from_slice(&mac_dst);
 
-        tx_descs[0] = *desc;
+        tx_descs[0] = desc;
     }
 
     // Submit back to Dev0 TX (forwarding/echoing)
@@ -167,16 +178,26 @@ fn test_af_xdp_echo_and_leak_detection() {
 
     // 9. Receive the echoed packet on Dev1 and verify MAC Swap & Payload Preservation
     let mut rx_descs_dev1 = vec![frame_descs_dev1[0]; 16];
-    let mut echoed = 0;
+    let mut target_echoed = None;
     let echo_start = Instant::now();
-    while echoed == 0 && echo_start.elapsed() < Duration::from_secs(4) {
-        echoed = unsafe { rx_q_dev1.consume(&mut rx_descs_dev1[..]) };
+    while target_echoed.is_none() && echo_start.elapsed() < Duration::from_secs(4) {
+        let echoed = unsafe { rx_q_dev1.consume(&mut rx_descs_dev1[..]) };
+        for desc in rx_descs_dev1.iter().take(echoed) {
+            let data = unsafe { umem_dev1.data(desc) };
+            let contents = data.contents();
+            // Match our unique source MAC address
+            if contents.len() >= 12 && &contents[6..12] == &[0xff, 0xff, 0xff, 0xff, 0xff, 0xff] {
+                target_echoed = Some(*desc);
+                break;
+            } else {
+                unsafe { fq_dev1.produce(std::slice::from_ref(desc)); }
+            }
+        }
     }
-    assert_eq!(echoed, 1, "Dev1 failed to receive the echoed packet");
+    let mut echoed_desc = target_echoed.expect("Dev1 failed to receive the echoed packet");
 
     {
-        let desc = &mut rx_descs_dev1[0];
-        let data = unsafe { umem_dev1.data(desc) };
+        let data = unsafe { umem_dev1.data(&mut echoed_desc) };
         let contents = data.contents();
 
         // Assert MAC swap occurred
@@ -197,7 +218,196 @@ fn test_af_xdp_echo_and_leak_detection() {
     }
     assert_eq!(completed_dev1, 1, "Dev1 failed to complete TX");
 
-    // Recycle injector frame
-    let recycled_dev1 = unsafe { fq_dev1.produce(&comp_descs_dev1[..1]) };
-    assert_eq!(recycled_dev1, 1);
+    // Recycle injector frame (we don't put it in fill queue to avoid conflict)
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn test_af_xdp_grpc_validation_and_drop_simulation() {
+    use std::convert::TryInto;
+    use std::num::NonZeroU32;
+    use std::process::Command;
+    use std::time::{Duration, Instant};
+    use xsk_rs::{
+        config::{Interface, SocketConfig, UmemConfigBuilder},
+        Socket, Umem, TxQueue,
+    };
+    use custos_grpc_basic::{parse_grpc_packet, ParseError};
+
+    // 1. Create temporary veth pair programmatically
+    let status = Command::new("ip")
+        .args(&[
+            "link", "add", "veth_g0", "type", "veth", "peer", "name", "veth_g1",
+        ])
+        .status()
+        .expect("Failed to execute ip link add command");
+    if !status.success() {
+        panic!("Failed to create temporary veth pair veth_g0 <-> veth_g1");
+    }
+
+    let _ = Command::new("ip")
+        .args(&["link", "set", "veth_g0", "up"])
+        .status();
+    let _ = Command::new("ip")
+        .args(&["link", "set", "veth_g1", "up"])
+        .status();
+
+    struct Cleanup;
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            let _ = Command::new("ip")
+                .args(&["link", "del", "veth_g0"])
+                .status();
+        }
+    }
+    let _cleanup = Cleanup;
+
+    // 2. Setup UMEM & Sockets
+    let frame_count = 128;
+    let umem_config = UmemConfigBuilder::new()
+        .frame_size(2048.try_into().unwrap())
+        .frame_headroom(0.try_into().unwrap())
+        .fill_queue_size(128.try_into().unwrap())
+        .comp_queue_size(128.try_into().unwrap())
+        .build()
+        .unwrap();
+
+    let (umem_dev0, frame_descs_dev0) = Umem::new(
+        umem_config.clone(),
+        NonZeroU32::new(frame_count).unwrap(),
+        false,
+    )
+    .unwrap();
+
+    let if_dev0: Interface = "veth_g0".parse().unwrap();
+    let (mut _tx_q_dev0, mut rx_q_dev0, fq_and_cq_dev0) =
+        unsafe { Socket::new(SocketConfig::default(), &umem_dev0, &if_dev0, 0) }.unwrap();
+    let (mut fq_dev0, mut _cq_dev0) = fq_and_cq_dev0.unwrap();
+    unsafe { fq_dev0.produce(&frame_descs_dev0); }
+
+    let (umem_dev1, mut frame_descs_dev1) =
+        Umem::new(umem_config, NonZeroU32::new(frame_count).unwrap(), false).unwrap();
+
+    let if_dev1: Interface = "veth_g1".parse().unwrap();
+    let (mut tx_q_dev1, _rx_q_dev1, fq_and_cq_dev1) =
+        unsafe { Socket::new(SocketConfig::default(), &umem_dev1, &if_dev1, 0) }.unwrap();
+    let (mut fq_dev1, mut cq_dev1) = fq_and_cq_dev1.unwrap();
+    
+    // Populate Fill Queue for Dev1 (excluding frames 0 and 1, reserved for TX)
+    let produced_dev1 = unsafe { fq_dev1.produce(&frame_descs_dev1[2..]) };
+    assert_eq!(produced_dev1, (frame_count - 2) as usize);
+
+    // 3. Helper to build and transmit packet payload
+    let transmit_packet = |tx_q: &mut TxQueue, umem: &Umem, desc: &mut xsk_rs::FrameDesc, payload: &[u8]| {
+        unsafe {
+            let mut data_mut = umem.data_mut(desc);
+            let mut cursor = data_mut.cursor();
+            use std::io::Write;
+            cursor.write_all(payload).unwrap();
+        }
+        let sent = unsafe { tx_q.produce(std::slice::from_mut(desc)) };
+        assert_eq!(sent, 1);
+        if tx_q.needs_wakeup() {
+            tx_q.wakeup().unwrap();
+        }
+    };
+
+    // 4. Construct a valid gRPC packet payload
+    let mut valid_payload = vec![0u8; 80];
+    valid_payload[0..6].copy_from_slice(&[0xff, 0xff, 0xff, 0xff, 0xff, 0xff]); // dst
+    valid_payload[6..12].copy_from_slice(&[0x02, 0x00, 0x00, 0x00, 0x00, 0x01]); // src (matching signature)
+    valid_payload[12..14].copy_from_slice(&0x0800u16.to_be_bytes()); // IPv4 ether type
+    valid_payload[14] = 0x45; // version / ihl
+    valid_payload[23] = 6; // TCP
+    // Valid checksum
+    let mut ip_hdr = [0u8; 20];
+    ip_hdr.copy_from_slice(&valid_payload[14..34]);
+    let csum = custos_grpc_basic::calculate_checksum(&ip_hdr);
+    valid_payload[24..26].copy_from_slice(&csum.to_be_bytes());
+
+    valid_payload[36..38].copy_from_slice(&50051u16.to_be_bytes()); // dst port
+    valid_payload[46] = 5 << 4; // TCP data offset (5 = 20 bytes)
+    valid_payload[54..57].copy_from_slice(&[0, 0, 10]); // HTTP/2 payload length 10
+    valid_payload[57] = 0x0; // HTTP/2 DATA frame type
+    valid_payload[64] = 0; // gRPC compression flag
+    valid_payload[65..69].copy_from_slice(&5u32.to_be_bytes()); // gRPC message length 5
+
+    // 5. Construct a malformed packet (e.g. non-TCP protocol UDP (17))
+    let mut malformed_payload = valid_payload.clone();
+    malformed_payload[23] = 17; // UDP
+    // Recalculate checksum so it passes IP checksum check
+    let mut ip_hdr_mal = [0u8; 20];
+    ip_hdr_mal.copy_from_slice(&malformed_payload[14..34]);
+    ip_hdr_mal[10] = 0;
+    ip_hdr_mal[11] = 0;
+    let csum_mal = custos_grpc_basic::calculate_checksum(&ip_hdr_mal);
+    malformed_payload[24..26].copy_from_slice(&csum_mal.to_be_bytes());
+
+    // 6. Test Valid Packet Flow (using frame 0 for valid TX)
+    transmit_packet(&mut tx_q_dev1, &umem_dev1, &mut frame_descs_dev1[0], &valid_payload);
+
+    let mut rx_descs = vec![frame_descs_dev0[0]; 16];
+    let mut target_desc = None;
+    let start = Instant::now();
+    while target_desc.is_none() && start.elapsed() < Duration::from_secs(4) {
+        let received = unsafe { rx_q_dev0.consume(&mut rx_descs[..]) };
+        for desc in rx_descs.iter().take(received) {
+            let data = unsafe { umem_dev0.data(desc) };
+            let contents = data.contents();
+            if contents.len() >= 12 && &contents[6..12] == &[0x02, 0x00, 0x00, 0x00, 0x00, 0x01] {
+                target_desc = Some(*desc);
+                break;
+            } else {
+                unsafe { fq_dev0.produce(std::slice::from_ref(desc)); }
+            }
+        }
+    }
+    let desc = target_desc.expect("Failed to receive valid packet on dev0");
+    
+    // Parse received packet
+    {
+        let data = unsafe { umem_dev0.data(&desc) };
+        let result = parse_grpc_packet(data.contents(), 50051);
+        assert!(result.is_ok(), "Failed to parse valid gRPC packet: {:?}", result.err());
+    }
+
+    // Recycle dev0 frame
+    unsafe { fq_dev0.produce(std::slice::from_ref(&desc)); }
+
+    // Reclaim dev1 frame
+    let mut comp_descs = vec![frame_descs_dev1[0]; 16];
+    let mut completed = 0;
+    let start = Instant::now();
+    while completed == 0 && start.elapsed() < Duration::from_secs(4) {
+        completed = unsafe { cq_dev1.consume(&mut comp_descs[..]) };
+    }
+    assert_eq!(completed, 1);
+
+    // 7. Test Malformed Packet Flow (using frame 1 for malformed TX to avoid conflict)
+    transmit_packet(&mut tx_q_dev1, &umem_dev1, &mut frame_descs_dev1[1], &malformed_payload);
+
+    let mut rx_descs_mal = vec![frame_descs_dev0[0]; 16];
+    let mut target_desc_mal = None;
+    let start = Instant::now();
+    while target_desc_mal.is_none() && start.elapsed() < Duration::from_secs(4) {
+        let received_mal = unsafe { rx_q_dev0.consume(&mut rx_descs_mal[..]) };
+        for desc in rx_descs_mal.iter().take(received_mal) {
+            let data = unsafe { umem_dev0.data(desc) };
+            let contents = data.contents();
+            if contents.len() >= 12 && &contents[6..12] == &[0x02, 0x00, 0x00, 0x00, 0x00, 0x01] {
+                target_desc_mal = Some(*desc);
+                break;
+            } else {
+                unsafe { fq_dev0.produce(std::slice::from_ref(desc)); }
+            }
+        }
+    }
+    let desc_mal = target_desc_mal.expect("Failed to receive malformed packet on dev0");
+
+    // Parse received packet (must return NonTCP error!)
+    {
+        let data = unsafe { umem_dev0.data(&desc_mal) };
+        let result = parse_grpc_packet(data.contents(), 50051);
+        assert_eq!(result.err(), Some(ParseError::NonTCP));
+    }
 }
