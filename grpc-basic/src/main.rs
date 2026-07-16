@@ -1,7 +1,7 @@
 //! Phase 2: Header Stripping & gRPC Validation.
 //!
-//! Receives ethernet packets, parses/validates IP/TCP, handles HTTP/2 framing,
-//! strips headers, and validates basic gRPC payload/methods.
+//! Provides the CLI and thread-pinning scaffold for future Ethernet/IP/TCP,
+//! HTTP/2 framing, and basic gRPC validation work.
 
 use clap::Parser;
 use std::error::Error;
@@ -28,14 +28,17 @@ fn main() -> Result<(), Box<dyn Error>> {
     tracing::subscriber::set_global_default(subscriber)?;
 
     let args = Args::parse();
-    info!("Initializing custos-grpc-basic on interface: {}", args.interface);
+    info!(
+        "Initializing custos-grpc-basic on interface: {}",
+        args.interface
+    );
 
     // Pin current thread to core
     custos_common::pin_thread_to_core(args.core)?;
 
     info!("Poller thread pinned. Phase 2 setup ready.");
-    
+
     // TODO: Implement Ethernet/IP/TCP parsing, HTTP/2 state-machine validation, and gRPC payload parsing.
-    
+
     Ok(())
 }

@@ -1,7 +1,7 @@
 //! Phase 3: Protobuf Tag Walking, Guards, and Stats.
 //!
-//! Deep packet inspection of gRPC-over-HTTP/2 payloads. Zero-allocation parsing
-//! of protobuf fields (varints, wire types) to enforce security rules and track statistics.
+//! Provides the CLI and thread-pinning scaffold for future zero-allocation
+//! protobuf field parsing, security guard enforcement, and telemetry.
 
 use clap::Parser;
 use std::error::Error;
@@ -28,14 +28,17 @@ fn main() -> Result<(), Box<dyn Error>> {
     tracing::subscriber::set_global_default(subscriber)?;
 
     let args = Args::parse();
-    info!("Initializing custos-protobuf on interface: {}", args.interface);
+    info!(
+        "Initializing custos-protobuf on interface: {}",
+        args.interface
+    );
 
     // Pin current thread to core
     custos_common::pin_thread_to_core(args.core)?;
 
     info!("Poller thread pinned. Phase 3 setup ready.");
-    
+
     // TODO: Implement zero-copy varint parsing, tag walking, security guards, and telemetry.
-    
+
     Ok(())
 }

@@ -63,9 +63,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     } else {
         Level::INFO
     };
-    let subscriber = FmtSubscriber::builder()
-        .with_max_level(log_level)
-        .finish();
+    let subscriber = FmtSubscriber::builder().with_max_level(log_level).finish();
     tracing::subscriber::set_global_default(subscriber)?;
 
     info!("Starting custos-phase1-echo...");
@@ -80,7 +78,10 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     // 2. Interface Resolution
     let if_name: Interface = args.interface.parse().map_err(|e| {
-        error!("Failed to parse interface name '{}': {:?}", args.interface, e);
+        error!(
+            "Failed to parse interface name '{}': {:?}",
+            args.interface, e
+        );
         e
     })?;
 
@@ -101,16 +102,15 @@ fn main() -> Result<(), Box<dyn Error>> {
     let frame_count_nonzero = NonZeroU32::new(args.frame_count)
         .ok_or("Frame count must be non-zero and a power of two")?;
 
-    let (umem, frame_descs) = Umem::new(
-        umem_config,
-        frame_count_nonzero,
-        use_huge_pages,
-    )
-    .map_err(|e| {
-        error!("Failed to initialize UMEM: {:?}", e);
-        e
-    })?;
-    info!("Initialized UMEM with {} frames (2KB size)", args.frame_count);
+    let (umem, frame_descs) =
+        Umem::new(umem_config, frame_count_nonzero, use_huge_pages).map_err(|e| {
+            error!("Failed to initialize UMEM: {:?}", e);
+            e
+        })?;
+    info!(
+        "Initialized UMEM with {} frames (2KB size)",
+        args.frame_count
+    );
 
     // 4. Socket Configuration
     let mut socket_config_builder = SocketConfig::builder();
@@ -124,20 +124,17 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     let socket_config = socket_config_builder.bind_flags(bind_flags).build();
 
-    let (tx_q, rx_q, fq_and_cq) = unsafe {
-        Socket::new(
-            socket_config,
-            &umem,
-            &if_name,
-            args.queue_id,
-        )
-    }
-    .map_err(|e| {
-        error!("Failed to initialize AF_XDP socket: {:?}", e);
-        e
-    })?;
-    let (mut fq, cq) = fq_and_cq.ok_or("Expected Fill and Completion queues from socket creation")?;
-    info!("Bound AF_XDP socket to interface: {}, queue: {}", args.interface, args.queue_id);
+    let (tx_q, rx_q, fq_and_cq) =
+        unsafe { Socket::new(socket_config, &umem, &if_name, args.queue_id) }.map_err(|e| {
+            error!("Failed to initialize AF_XDP socket: {:?}", e);
+            e
+        })?;
+    let (mut fq, cq) =
+        fq_and_cq.ok_or("Expected Fill and Completion queues from socket creation")?;
+    info!(
+        "Bound AF_XDP socket to interface: {}, queue: {}",
+        args.interface, args.queue_id
+    );
 
     // 5. Populate Fill Queue with all available UMEM frames
     // SAFETY: We are initializing the Fill Queue with all frames at startup, ensuring they are not in flight.
@@ -153,7 +150,17 @@ fn main() -> Result<(), Box<dyn Error>> {
     info!("Populated Fill Queue with all {} frames", produced);
 
     // 6. Packet Processing Loop
-    run_packet_loop(args.mode, args.verbose, umem, rx_q, tx_q, fq, cq, frame_descs[0], args.frame_count)?;
+    run_packet_loop(
+        args.mode,
+        args.verbose,
+        umem,
+        rx_q,
+        tx_q,
+        fq,
+        cq,
+        frame_descs[0],
+        args.frame_count,
+    )?;
 
     Ok(())
 }
@@ -248,7 +255,11 @@ fn run_packet_loop(
                             mac_src.copy_from_slice(&contents[6..12]);
                             contents[0..6].copy_from_slice(&mac_src);
                             contents[6..12].copy_from_slice(&mac_dst);
-                            trace!("Swapped MAC headers: dst={:02x?} src={:02x?}", mac_src, mac_dst);
+                            trace!(
+                                "Swapped MAC headers: dst={:02x?} src={:02x?}",
+                                mac_src,
+                                mac_dst
+                            );
                         }
                     }
 
@@ -341,7 +352,10 @@ fn run_packet_loop(
 
             // Conservation of Descriptors Assertion (Ensures we haven't leaked any descriptor pointers)
             if total_tracked != frame_count as i64 {
-                error!("CRITICAL: Frame accounting mismatch! Expected {} descriptors, tracked {}.", frame_count, total_tracked);
+                error!(
+                    "CRITICAL: Frame accounting mismatch! Expected {} descriptors, tracked {}.",
+                    frame_count, total_tracked
+                );
                 panic!("Descriptor leak detected!");
             }
 

@@ -14,21 +14,29 @@ fn test_af_xdp_echo_and_leak_detection() {
 
     // 1. Create temporary veth pair programmatically inside the container network namespace
     let status = Command::new("ip")
-        .args(&["link", "add", "veth_t0", "type", "veth", "peer", "name", "veth_t1"])
+        .args(&[
+            "link", "add", "veth_t0", "type", "veth", "peer", "name", "veth_t1",
+        ])
         .status()
         .expect("Failed to execute ip link add command");
     if !status.success() {
         panic!("Failed to create temporary veth pair veth_t0 <-> veth_t1");
     }
 
-    let _ = Command::new("ip").args(&["link", "set", "veth_t0", "up"]).status();
-    let _ = Command::new("ip").args(&["link", "set", "veth_t1", "up"]).status();
+    let _ = Command::new("ip")
+        .args(&["link", "set", "veth_t0", "up"])
+        .status();
+    let _ = Command::new("ip")
+        .args(&["link", "set", "veth_t1", "up"])
+        .status();
 
     // RAII helper to clean up veth interfaces even if the test panics
     struct Cleanup;
     impl Drop for Cleanup {
         fn drop(&mut self) {
-            let _ = Command::new("ip").args(&["link", "del", "veth_t0"]).status();
+            let _ = Command::new("ip")
+                .args(&["link", "del", "veth_t0"])
+                .status();
         }
     }
     let _cleanup = Cleanup;
@@ -52,39 +60,24 @@ fn test_af_xdp_echo_and_leak_detection() {
 
     // 3. Setup Socket for Device 0 (binds to veth_t0)
     let if_dev0: Interface = "veth_t0".parse().unwrap();
-    let (mut tx_q_dev0, mut rx_q_dev0, fq_and_cq_dev0) = unsafe {
-        Socket::new(
-            SocketConfig::default(),
-            &umem_dev0,
-            &if_dev0,
-            0,
-        )
-    }
-    .unwrap();
+    let (mut tx_q_dev0, mut rx_q_dev0, fq_and_cq_dev0) =
+        unsafe { Socket::new(SocketConfig::default(), &umem_dev0, &if_dev0, 0) }.unwrap();
     let (mut fq_dev0, mut cq_dev0) = fq_and_cq_dev0.unwrap();
 
     // Populate Fill Queue for Dev0 (giving it all descriptors to receive packets)
     let produced = unsafe { fq_dev0.produce(&frame_descs_dev0) };
-    assert_eq!(produced, frame_count as usize, "Failed to load all descriptors into Fill ring");
+    assert_eq!(
+        produced, frame_count as usize,
+        "Failed to load all descriptors into Fill ring"
+    );
 
     // 4. Setup UMEM & Socket for Device 1 (Test Packet Injector / Receiver)
-    let (umem_dev1, mut frame_descs_dev1) = Umem::new(
-        umem_config,
-        NonZeroU32::new(frame_count).unwrap(),
-        false,
-    )
-    .unwrap();
+    let (umem_dev1, mut frame_descs_dev1) =
+        Umem::new(umem_config, NonZeroU32::new(frame_count).unwrap(), false).unwrap();
 
     let if_dev1: Interface = "veth_t1".parse().unwrap();
-    let (mut tx_q_dev1, mut rx_q_dev1, fq_and_cq_dev1) = unsafe {
-        Socket::new(
-            SocketConfig::default(),
-            &umem_dev1,
-            &if_dev1,
-            0,
-        )
-    }
-    .unwrap();
+    let (mut tx_q_dev1, mut rx_q_dev1, fq_and_cq_dev1) =
+        unsafe { Socket::new(SocketConfig::default(), &umem_dev1, &if_dev1, 0) }.unwrap();
     let (mut fq_dev1, mut cq_dev1) = fq_and_cq_dev1.unwrap();
 
     // Populate Fill Queue for Dev1 (needed to receive the echoed packet back)
@@ -120,7 +113,7 @@ fn test_af_xdp_echo_and_leak_detection() {
     // 7. Receive on Dev0, swap MACs, and Echo back
     let mut rx_descs = vec![frame_descs_dev0[0]; 16];
     let mut tx_descs = rx_descs.clone();
-    
+
     let mut received = 0;
     let start = Instant::now();
     while received == 0 && start.elapsed() < Duration::from_secs(4) {
@@ -134,7 +127,7 @@ fn test_af_xdp_echo_and_leak_detection() {
         let mut data_mut = unsafe { umem_dev0.data_mut(desc) };
         let contents = data_mut.contents_mut();
         assert!(contents.len() >= 12);
-        
+
         let mut mac_dst = [0u8; 6];
         let mut mac_src = [0u8; 6];
         mac_dst.copy_from_slice(&contents[0..6]);
@@ -142,7 +135,7 @@ fn test_af_xdp_echo_and_leak_detection() {
         // Swap Destination & Source MAC in-place
         contents[0..6].copy_from_slice(&mac_src);
         contents[6..12].copy_from_slice(&mac_dst);
-        
+
         tx_descs[0] = *desc;
     }
 
@@ -160,11 +153,17 @@ fn test_af_xdp_echo_and_leak_detection() {
     while completed == 0 && comp_start.elapsed() < Duration::from_secs(4) {
         completed = unsafe { cq_dev0.consume(&mut comp_descs[..]) };
     }
-    assert_eq!(completed, 1, "Dev0 failed to reclaim sent descriptor from Completion queue");
+    assert_eq!(
+        completed, 1,
+        "Dev0 failed to reclaim sent descriptor from Completion queue"
+    );
 
     // Return the completed descriptor to the Fill ring (Recycle)
     let recycled = unsafe { fq_dev0.produce(&comp_descs[..1]) };
-    assert_eq!(recycled, 1, "Failed to return completed descriptor to Fill ring");
+    assert_eq!(
+        recycled, 1,
+        "Failed to return completed descriptor to Fill ring"
+    );
 
     // 9. Receive the echoed packet on Dev1 and verify MAC Swap & Payload Preservation
     let mut rx_descs_dev1 = vec![frame_descs_dev1[0]; 16];
@@ -179,7 +178,7 @@ fn test_af_xdp_echo_and_leak_detection() {
         let desc = &mut rx_descs_dev1[0];
         let data = unsafe { umem_dev1.data(desc) };
         let contents = data.contents();
-        
+
         // Assert MAC swap occurred
         // Destination MAC should now be Dev1's original MAC (02:00:00:00:00:01)
         assert_eq!(&contents[0..6], &[0x02, 0x00, 0x00, 0x00, 0x00, 0x01]);
@@ -197,7 +196,7 @@ fn test_af_xdp_echo_and_leak_detection() {
         completed_dev1 = unsafe { cq_dev1.consume(&mut comp_descs_dev1[..]) };
     }
     assert_eq!(completed_dev1, 1, "Dev1 failed to complete TX");
-    
+
     // Recycle injector frame
     let recycled_dev1 = unsafe { fq_dev1.produce(&comp_descs_dev1[..1]) };
     assert_eq!(recycled_dev1, 1);

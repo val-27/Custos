@@ -8,7 +8,7 @@ This sub-crate implements the Phase 1 high-performance packet forwarding/echo ap
 - **Queue Buffering**: Double-buffered rings using Fill, RX, TX, and Completion rings.
 - **Zero Heap Allocations**: Pre-allocates descriptor batches on the stack/outside the hot path to avoid runtime memory overhead.
 - **Zero-Copy Forwarding**: Incoming frame descriptors are modified in-place and submitted directly to the TX ring, cycling back to the Fill ring via the Completion ring.
-- **Thread Pinning**: Utilizes `sched_setaffinity` via `custos-common` to pin the poller thread to isolated CPU core 0.
+- **Thread Pinning**: Utilizes `sched_setaffinity` via `custos-common` to pin the poller thread to the configured CPU core, defaulting to core 0.
 
 ## Build and Run
 
@@ -33,6 +33,8 @@ sudo ./target/release/custos-phase1-echo --interface veth0 --queue-id 0 --frame-
   - `forward`: Zero-copy forwards all packets to the TX ring.
   - `echo`: Swaps packet Ethernet source and destination MAC addresses in-place before forwarding.
 - `-v, --verbose`: Enables verbose debugging logs to monitor packet batches.
+- `--force-copy`: Forces AF_XDP copy mode (`XDP_COPY`).
+- `--force-zerocopy`: Forces AF_XDP zero-copy mode (`XDP_ZEROCOPY`).
 
 ## Performance Expectations
 

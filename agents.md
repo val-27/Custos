@@ -53,13 +53,13 @@ Welcome to the Custos codebase. As a high-performance network security appliance
 ## Testing
 
 - **Unit Testing**: Write unit tests for all parser implementations, state machines, and protobuf validation rules. Use mocked packet buffers.
-- **Integration/Perf Testing**: Place integration tests in the [tests/](file:///Users/jpvalent/.treehouse/Custos-1475d5/1/Custos/tests) folder. Simulate external traffic using tools like `scapy`, `pktgen`, or `tcpreplay` to test against actual AF_XDP endpoints.
+- **Integration/Perf Testing**: Place integration tests in the `tests/` folder. Simulate external traffic using tools like `scapy`, `pktgen`, or `tcpreplay` to test against actual AF_XDP endpoints.
 
 ## Directory & Sub-Crate Conventions
 
-- **Sub-Crates**: Each phase (`echo`, `grpc-basic`, `protobuf`) must be an independent Cargo package with its own `Cargo.toml`.
-- **Self-Containment**: A developer should be able to navigate to any phase directory and compile/run it without building the entire workspace (e.g., `cd echo && cargo run`).
-- **Shared Code**: Put reusable logic, hardware/driver bindings, and helper modules in the [common/](file:///Users/jpvalent/.treehouse/Custos-1475d5/1/Custos/common) sub-crate.
+- **Sub-Crates**: Each phase (`phase1-echo`, `grpc-basic`, `protobuf`) must be an independent Cargo package with its own `Cargo.toml`.
+- **Self-Containment**: A developer should be able to navigate to any phase directory and compile/run it without building the entire workspace (e.g., `cd phase1-echo && cargo run`).
+- **Shared Code**: Put reusable logic, hardware/driver bindings, and helper modules in the `common/` sub-crate.
 
 ## Git & Version Control
 

@@ -4,12 +4,12 @@ Project Custos is a high-performance, user-space network security appliance buil
 
 ## Directory Structure
 
-- [common/](file:///Users/jpvalent/.treehouse/Custos-1475d5/1/Custos/common) - Shared utility libraries, including core affinity settings and ring buffers.
-- [echo/](file:///Users/jpvalent/.treehouse/Custos-1475d5/1/Custos/echo) - Phase 1: A single-core loop that receives and echoes/forwards ethernet packets over AF_XDP.
-- [grpc-basic/](file:///Users/jpvalent/.treehouse/Custos-1475d5/1/Custos/grpc-basic) - Phase 2: Inspects TCP packets to validate HTTP/2 framing, parses gRPC metadata, and performs header stripping.
-- [protobuf/](file:///Users/jpvalent/.treehouse/Custos-1475d5/1/Custos/protobuf) - Phase 3: Deep packet inspection of Protobuf messages via zero-copy tag walking, enforcing security boundaries.
-- [tests/](file:///Users/jpvalent/.treehouse/Custos-1475d5/1/Custos/tests) - Integration, validation, and performance test suites.
-- [agents.md](file:///Users/jpvalent/.treehouse/Custos-1475d5/1/Custos/agents.md) - Guidelines and coding conventions for coding agents.
+- [common/](common/) - Shared utility libraries, including core affinity settings.
+- [phase1-echo/](phase1-echo/) - Phase 1: A single-core loop that receives and drops, forwards, or echoes Ethernet packets over AF_XDP.
+- [grpc-basic/](grpc-basic/) - Phase 2 scaffold for HTTP/2 and gRPC validation.
+- [protobuf/](protobuf/) - Phase 3 scaffold for Protobuf tag walking and security guards.
+- [tests/](tests/) - Integration, validation, and performance test suites.
+- [agents.md](agents.md) - Guidelines and coding conventions for coding agents.
 
 ## Build and Run
 
@@ -20,6 +20,6 @@ cargo build --release
 
 To run a specific sub-crate (e.g., the Phase 1 Echo daemon):
 ```bash
-cd echo
+cd phase1-echo
 cargo run --release -- --interface eth0 --core 1
 ```
