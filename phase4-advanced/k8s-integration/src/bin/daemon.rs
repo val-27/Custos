@@ -108,11 +108,46 @@ fn create_shared_mem_fd(size: usize) -> io::Result<RawFd> {
     }
 }
 
+/// Verifies the peer credentials of the worker connecting over UDS.
+#[cfg(target_os = "linux")]
+fn verify_peer_credentials(stream: &std::os::unix::net::UnixStream) -> io::Result<()> {
+    use std::os::unix::io::AsRawFd;
+    let mut ucred = libc::ucred {
+        pid: 0,
+        uid: 0,
+        gid: 0,
+    };
+    let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+    // SAFETY: getsockopt is called on the UnixStream FD to verify credentials.
+    let res = unsafe {
+        libc::getsockopt(
+            stream.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_PEERCRED,
+            &mut ucred as *mut _ as *mut libc::c_void,
+            &mut len,
+        )
+    };
+    if res < 0 {
+        return Err(io::Error::last_os_error());
+    }
+
+    // Allow root (0), the unprivileged worker UID (10001), or 'nobody' (65534).
+    if ucred.uid != 0 && ucred.uid != 10001 && ucred.uid != 65534 {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!("Unauthorized peer connection from UID {}", ucred.uid),
+        ));
+    }
+    info!("Verified worker credentials: PID={}, UID={}, GID={}", ucred.pid, ucred.uid, ucred.gid);
+    Ok(())
+}
+
 #[cfg(target_os = "linux")]
 mod linux {
     use super::*;
 
-    /// Core Linux AF_XDP socket setup.
+    /// Core Linux AF_XDP socket setup using libxdp.
     ///
     /// # Safety Invariants
     /// * `umem_addr` must point to a valid, mapped UMEM memory region of size `umem_size`.
@@ -120,154 +155,87 @@ mod linux {
         args: &Args,
         umem_addr: *mut libc::c_void,
         umem_size: usize,
-    ) -> Result<RawFd, Box<dyn Error>> {
-        // 1. Create AF_XDP socket
-        // SAFETY: socket is called with AF_XDP and SOCK_RAW.
-        let fd = unsafe { libc::socket(libc::AF_XDP, libc::SOCK_RAW, 0) };
-        if fd < 0 {
-            return Err(format!(
-                "Failed to create AF_XDP socket: {}",
-                io::Error::last_os_error()
-            )
-            .into());
-        }
-        let socket_fd = fd;
-        info!("Created AF_XDP socket FD: {}", socket_fd);
+    ) -> Result<(RawFd, *mut libxdp_sys::xsk_umem, *mut libxdp_sys::xsk_socket), Box<dyn Error>> {
+        let mut umem_ptr: *mut libxdp_sys::xsk_umem = std::ptr::null_mut();
+        let mut fq = Box::new(std::mem::zeroed::<libxdp_sys::xsk_ring_prod>());
+        let mut cq = Box::new(std::mem::zeroed::<libxdp_sys::xsk_ring_cons>());
 
-        // 2. Register UMEM
-        let mut umem_reg = libxdp_sys::xdp_umem_reg {
-            addr: umem_addr as u64,
-            len: umem_size as u64,
-            chunk_size: args.frame_size,
-            headroom: 0,
+        let umem_config = libxdp_sys::xsk_umem_config {
+            fill_size: args.frame_count,
+            comp_size: args.frame_count,
+            frame_size: args.frame_size,
+            frame_headroom: 0,
             flags: 0,
         };
-        // SAFETY: setsockopt registers the allocated UMEM region with the kernel.
-        let res = unsafe {
-            libc::setsockopt(
-                socket_fd,
-                libc::SOL_XDP,
-                libc::XDP_UMEM_REG,
-                &mut umem_reg as *mut _ as *mut libc::c_void,
-                std::mem::size_of::<libxdp_sys::xdp_umem_reg>() as libc::socklen_t,
-            )
-        };
-        if res < 0 {
-            return Err(format!("Failed to register UMEM: {}", io::Error::last_os_error()).into());
-        }
-        info!("UMEM registered with the kernel successfully");
 
-        // 3. Set ring sizes
-        let ring_size = args.frame_count;
-        // SAFETY: setsockopt sets Fill ring size
-        let res = unsafe {
-            libc::setsockopt(
-                socket_fd,
-                libc::SOL_XDP,
-                libc::XDP_UMEM_FILL_RING,
-                &ring_size as *const _ as *const libc::c_void,
-                std::mem::size_of::<u32>() as libc::socklen_t,
+        // 1. Create UMEM
+        // SAFETY: calling libxdp_sys::xsk_umem__create to create the UMEM.
+        let err = unsafe {
+            libxdp_sys::xsk_umem__create(
+                &mut umem_ptr,
+                umem_addr,
+                umem_size as u64,
+                fq.as_mut(),
+                cq.as_mut(),
+                &umem_config,
             )
         };
-        if res < 0 {
-            return Err(format!(
-                "Failed to set UMEM Fill ring size: {}",
-                io::Error::last_os_error()
-            )
-            .into());
+        if err != 0 {
+            return Err(format!("xsk_umem__create failed: {}", io::Error::from_raw_os_error(-err)).into());
         }
-        // SAFETY: setsockopt sets Completion ring size
-        let res = unsafe {
-            libc::setsockopt(
-                socket_fd,
-                libc::SOL_XDP,
-                libc::XDP_UMEM_COMP_RING,
-                &ring_size as *const _ as *const libc::c_void,
-                std::mem::size_of::<u32>() as libc::socklen_t,
+        info!("UMEM registered with the kernel successfully using libxdp");
+
+        // 2. Create Socket Config
+        let socket_config = libxdp_sys::xsk_socket_config {
+            rx_size: args.frame_count,
+            tx_size: args.frame_count,
+            libxdp_flags: 0,
+            xdp_flags: 0,
+            bind_flags: if args.force_copy {
+                libxdp_sys::XDP_COPY as u16
+            } else {
+                libxdp_sys::XDP_USE_NEED_WAKEUP as u16
+            },
+        };
+
+        // 3. Create Socket (automatically binds to interface and loads BPF program)
+        let mut socket_ptr: *mut libxdp_sys::xsk_socket = std::ptr::null_mut();
+        let mut rx = Box::new(std::mem::zeroed::<libxdp_sys::xsk_ring_cons>());
+        let mut tx = Box::new(std::mem::zeroed::<libxdp_sys::xsk_ring_prod>());
+        let ifname_cstr = std::ffi::CString::new(args.interface.clone()).unwrap();
+
+        // SAFETY: calling libxdp_sys::xsk_socket__create to create and bind the socket.
+        let err = unsafe {
+            libxdp_sys::xsk_socket__create(
+                &mut socket_ptr,
+                ifname_cstr.as_ptr(),
+                args.queue_id,
+                umem_ptr,
+                rx.as_mut(),
+                tx.as_mut(),
+                &socket_config,
             )
         };
-        if res < 0 {
-            return Err(format!(
-                "Failed to set UMEM Completion ring size: {}",
-                io::Error::last_os_error()
-            )
-            .into());
-        }
-        // SAFETY: setsockopt sets RX ring size
-        let res = unsafe {
-            libc::setsockopt(
-                socket_fd,
-                libc::SOL_XDP,
-                libc::XDP_RX_RING,
-                &ring_size as *const _ as *const libc::c_void,
-                std::mem::size_of::<u32>() as libc::socklen_t,
-            )
-        };
-        if res < 0 {
-            return Err(
-                format!("Failed to set RX ring size: {}", io::Error::last_os_error()).into(),
-            );
-        }
-        // SAFETY: setsockopt sets TX ring size
-        let res = unsafe {
-            libc::setsockopt(
-                socket_fd,
-                libc::SOL_XDP,
-                libc::XDP_TX_RING,
-                &ring_size as *const _ as *const libc::c_void,
-                std::mem::size_of::<u32>() as libc::socklen_t,
-            )
-        };
-        if res < 0 {
-            return Err(
-                format!("Failed to set TX ring size: {}", io::Error::last_os_error()).into(),
-            );
+        if err != 0 {
+            // SAFETY: Clean up UMEM if socket creation fails.
+            unsafe { libxdp_sys::xsk_umem__delete(umem_ptr); }
+            return Err(format!("xsk_socket__create failed: {}", io::Error::from_raw_os_error(-err)).into());
         }
 
-        // 4. Bind socket to interface and queue
-        let if_index = unsafe {
-            libc::if_nametoindex(
-                std::ffi::CString::new(args.interface.clone())
-                    .unwrap()
-                    .as_ptr(),
-            )
-        };
-        if if_index == 0 {
-            return Err(format!("Failed to find interface index for '{}'", args.interface).into());
+        // 4. Get socket FD
+        // SAFETY: Calling xsk_socket__fd on a valid socket pointer.
+        let socket_fd = unsafe { libxdp_sys::xsk_socket__fd(socket_ptr) };
+        if socket_fd < 0 {
+            // SAFETY: Clean up resources on failure.
+            unsafe {
+                libxdp_sys::xsk_socket__delete(socket_ptr);
+                libxdp_sys::xsk_umem__delete(umem_ptr);
+            }
+            return Err(format!("xsk_socket__fd returned invalid fd: {}", socket_fd).into());
         }
 
-        let mut bind_flags = libc::XDP_USE_NEED_WAKEUP;
-        if args.force_copy {
-            bind_flags |= libc::XDP_COPY;
-        }
-
-        let mut addr: libc::sockaddr_xdp = std::mem::zeroed();
-        addr.sxdp_family = libc::AF_XDP as u16;
-        addr.sxdp_flags = bind_flags as u16;
-        addr.sxdp_ifindex = if_index;
-        addr.sxdp_queue_id = args.queue_id;
-
-        // SAFETY: bind binds the socket to the physical interface and queue. Requires CAP_NET_ADMIN.
-        let res = unsafe {
-            libc::bind(
-                socket_fd,
-                &addr as *const _ as *const libc::sockaddr,
-                std::mem::size_of::<libc::sockaddr_xdp>() as libc::socklen_t,
-            )
-        };
-        if res < 0 {
-            return Err(format!(
-                "Failed to bind AF_XDP socket: {}",
-                io::Error::last_os_error()
-            )
-            .into());
-        }
-        info!(
-            "AF_XDP socket bound to interface '{}' (index {}), queue {}",
-            args.interface, if_index, args.queue_id
-        );
-
-        Ok(socket_fd)
+        info!("AF_XDP socket created, bound, and default eBPF redirect program attached successfully");
+        Ok((socket_fd, umem_ptr, socket_ptr))
     }
 }
 
@@ -312,16 +280,23 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     // Create AF_XDP socket & register UMEM
     let socket_fd: RawFd;
+    let _umem_ptr: *mut libc::c_void;
+    let _socket_ptr: *mut libc::c_void;
 
     #[cfg(target_os = "linux")]
     {
         // SAFETY: We pass verified arguments and map UMEM successfully.
-        socket_fd = unsafe { linux::run_daemon_setup(&args, umem_addr, umem_size)? };
+        let (fd, u_ptr, s_ptr) = unsafe { linux::run_daemon_setup(&args, umem_addr, umem_size)? };
+        socket_fd = fd;
+        _umem_ptr = u_ptr as *mut libc::c_void;
+        _socket_ptr = s_ptr as *mut libc::c_void;
     }
 
     #[cfg(not(target_os = "linux"))]
     {
         socket_fd = 999; // Mock file descriptor
+        _umem_ptr = ptr::null_mut();
+        _socket_ptr = ptr::null_mut();
         info!("Running on non-Linux OS. Stubbing AF_XDP socket creation (mock FD 999)");
     }
 
@@ -338,9 +313,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 
     let listener = UnixListener::bind(socket_path)?;
-    fs::set_permissions(socket_path, fs::Permissions::from_mode(0o666))?;
+    // Set 0o660 permissions so only owner and group can write/read the socket
+    fs::set_permissions(socket_path, fs::Permissions::from_mode(0o660))?;
     info!(
-        "Unix Domain Socket server listening on: {}",
+        "Unix Domain Socket server listening on: {} (mode: 0660)",
         args.socket_path
     );
 
@@ -362,6 +338,15 @@ fn main() -> Result<(), Box<dyn Error>> {
         match listener.accept() {
             Ok((mut stream, addr)) => {
                 info!("Accepted client connection from: {:?}", addr);
+
+                // Authenticate peer credentials on Linux
+                #[cfg(target_os = "linux")]
+                {
+                    if let Err(e) = verify_peer_credentials(&stream) {
+                        error!("Peer credentials validation failed: {}. Rejecting client.", e);
+                        continue;
+                    }
+                }
 
                 // 1. Send configuration as JSON
                 let config_str = serde_json::to_string(&worker_config)?;
