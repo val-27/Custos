@@ -1,0 +1,8 @@
+[workspace]
+resolver = "2"
+members = [
+    "multi-queue-sharding",
+    "k8s-integration",
+    "rules-engine",
+    "tx-optimizations",
+]

@@ -71,3 +71,22 @@ Welcome to the Custos codebase. As a high-performance network security appliance
 - **Thread Pinning**: Always pin polling threads to dedicated CPU cores using `sched_setaffinity` (via `custos-common`) to avoid context switching overhead.
 - **Hugepages**: Use 2MB or 1GB hugepages for UMEM mappings to reduce TLB misses during frame buffer lookups.
 - **Timers**: Use `std::time::Instant` or TSC-based counters for high-resolution timing measurements.
+
+## Phase 4 Guidelines (Advanced Production Pipeline)
+
+- **Multi-core & Sharding**:
+  - Implement strict **shared-nothing** core affinity.
+  - No cross-thread sharing of packet ring buffers, UMEM descriptors, or fast paths to eliminate cache bouncing.
+  - Configuration and policy data must be read-only in the hot path, or updated using lock-free pointer swapping (e.g., `ArcSwap`).
+- **Kubernetes & eBPF Integration**:
+  - Maintain a strict boundary between privileged and unprivileged namespaces. The eBPF control plane loader runs as root (`CAP_SYS_ADMIN`), while the processing engine runs unprivileged.
+  - Transfer bound AF_XDP socket file descriptors from the privileged daemon to the unprivileged processing engine using Unix domain sockets with file descriptor passing (`SCM_RIGHTS`).
+- **Dynamic Rules & Policy Reloading**:
+  - Policies and rules must support hot-reloading without blocking or pausing the packet processing hot path.
+  - Use double-buffered structures or atomic swaps to prevent synchronization locks in packet processing loops.
+- **Advanced Performance & Hardware Optimizations**:
+  - Align UMEM allocations and polling threads to the same NUMA node as the network interface card (NIC).
+  - Implement batch prefetching (`std::intrinsics::prefetch` or CPU prefetch instructions) of packet header cachelines during processing.
+- **Scale & Stress Testing**:
+  - Run long-running performance tests using kernel packet generators (e.g., `pktgen`, `tcpreplay`, or hardware-based generators) to test under high-rate bursty conditions.
+
