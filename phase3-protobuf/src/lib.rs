@@ -391,7 +391,9 @@ mod tests {
 
     #[test]
     fn test_varint_overflow() {
-        let proto = vec![0x10, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x01];
+        let proto = vec![
+            0x10, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x01,
+        ];
         let buf = build_proto_packet(&proto);
         let mut config = ValidationConfig::default();
         config.max_varint_bytes = 10;
@@ -440,7 +442,10 @@ mod tests {
 
     #[test]
     fn test_tensor_size_overflow() {
-        let proto = vec![0x0a, 17, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x01, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x01, 100];
+        let proto = vec![
+            0x0a, 17, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x01, 0xff, 0xff, 0xff, 0xff, 0xff,
+            0xff, 0xff, 0x01, 100,
+        ];
         let buf = build_proto_packet(&proto);
         let config = ValidationConfig::default();
         let err = validate_grpc_protobuf_packet(&buf, &config).unwrap_err();
@@ -449,13 +454,7 @@ mod tests {
 
     #[test]
     fn test_recursion_limit() {
-        let proto = vec![
-            0x12, 12,
-            0x12, 10,
-            0x12, 8,
-            0x12, 6,
-            0x0a, 4, 1, 2, 3, 4
-        ];
+        let proto = vec![0x12, 12, 0x12, 10, 0x12, 8, 0x12, 6, 0x0a, 4, 1, 2, 3, 4];
         let buf = build_proto_packet(&proto);
         let mut config = ValidationConfig::default();
         config.max_recursion_depth = 2;
@@ -468,10 +467,7 @@ mod tests {
         // Tag 2 (length 10)
         // Inner: Tag 1 (shape), length 8, values: 1, 3, 224, 224, 10, 10
         // 224 is 0xe0, 0x01 in varint
-        let proto = vec![
-            0x12, 10,
-            0x0a, 8, 1, 3, 0xe0, 0x01, 0xe0, 0x01, 10, 10
-        ];
+        let proto = vec![0x12, 10, 0x0a, 8, 1, 3, 0xe0, 0x01, 0xe0, 0x01, 10, 10];
         let buf = build_proto_packet(&proto);
         let mut config = ValidationConfig::default();
         config.max_dimensions = 6;
@@ -483,10 +479,7 @@ mod tests {
 
     #[test]
     fn test_nested_shape_value_invalid() {
-        let proto = vec![
-            0x12, 6,
-            0x0a, 4, 1, 3, 0, 10
-        ];
+        let proto = vec![0x12, 6, 0x0a, 4, 1, 3, 0, 10];
         let buf = build_proto_packet(&proto);
         let config = ValidationConfig::default();
         let err = validate_grpc_protobuf_packet(&buf, &config).unwrap_err();
@@ -495,10 +488,7 @@ mod tests {
 
     #[test]
     fn test_nested_shape_dimension_limit() {
-        let proto = vec![
-            0x12, 8,
-            0x0a, 6, 1, 2, 3, 4, 5, 6
-        ];
+        let proto = vec![0x12, 8, 0x0a, 6, 1, 2, 3, 4, 5, 6];
         let buf = build_proto_packet(&proto);
         let mut config = ValidationConfig::default();
         config.max_dimensions = 4;
@@ -509,7 +499,9 @@ mod tests {
     #[test]
     fn test_varint_valid_10_bytes() {
         // u64::MAX in varint representation: 10 bytes: 9 bytes of 0xff and 1 byte of 0x01
-        let proto = vec![0x10, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x01];
+        let proto = vec![
+            0x10, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x01,
+        ];
         let buf = build_proto_packet(&proto);
         let mut config = ValidationConfig::default();
         config.max_varint_bytes = 10;
@@ -520,7 +512,9 @@ mod tests {
     #[test]
     fn test_varint_overflow_10_bytes() {
         // 10th byte has lowest bits set (>1) which overflows u64
-        let proto = vec![0x10, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x02];
+        let proto = vec![
+            0x10, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x02,
+        ];
         let buf = build_proto_packet(&proto);
         let mut config = ValidationConfig::default();
         config.max_varint_bytes = 10;
@@ -533,8 +527,7 @@ mod tests {
         // Tag 2 (length 6) containing 0xff bytes (looks like nested message but is binary noise)
         // Tag 1 (shape), length 6, values 1, 3, 224, 224
         let proto = vec![
-            0x12, 6, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-            0x0a, 6, 1, 3, 0xe0, 0x01, 0xe0, 0x01
+            0x12, 6, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x0a, 6, 1, 3, 0xe0, 0x01, 0xe0, 0x01,
         ];
         let buf = build_proto_packet(&proto);
         let config = ValidationConfig::default();

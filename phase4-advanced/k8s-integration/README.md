@@ -1,6 +1,6 @@
 # Phase 4: Kubernetes Integration with Privilege Separation for Custos
 
-This directory contains the implementation of Kubernetes support for **Custos**, a high-performance network security appliance. 
+This directory contains the implementation of Kubernetes support for **Custos**, a high-performance network security appliance.
 
 To achieve maximum safety and follow the principle of least privilege, the design decouples the **privileged setup operations** (creating AF_XDP sockets, binding to physical interfaces, and loading eBPF/XDP programs) from the **unprivileged packet processing operations** (parsing gRPC HTTP/2 headers and walking Protobuf wire-format structures).
 
@@ -9,7 +9,7 @@ To achieve maximum safety and follow the principle of least privilege, the desig
 ## Architecture Flow
 
 The system is partitioned into two components:
-1. **Privileged Host Daemon (`custos-k8s-daemon`)**: Runs as a `DaemonSet` with elevated privileges (`CAP_NET_RAW`, `CAP_NET_ADMIN`, `CAP_SYS_ADMIN`) and host network access. It performs all socket setup, registers the UMEM region, binds the socket, and attaches BPF filters.
+1. **Privileged Host Daemon (`custos-k8s-daemon`)**: Runs as a `DaemonSet` with `NET_RAW`, `NET_ADMIN`, and `SYS_ADMIN` capabilities plus host network access. It performs socket setup, registers the UMEM region, binds the socket, and passes resources to workers.
 2. **Unprivileged Worker (`custos-k8s-worker`)**: Runs as a standard `Deployment` with no capabilities, restricted system calls, and a read-only root filesystem. It inherits resources from the daemon.
 
 ### Communication and Initialization Sequence
@@ -25,7 +25,7 @@ sequenceDiagram
     Daemon->>K8s Node: syscall: memfd_create() -> Allocates UMEM file
     Daemon->>K8s Node: syscall: socket(AF_XDP, SOCK_RAW)
     Daemon->>K8s Node: syscall: setsockopt(SOL_XDP, XDP_UMEM_REG) -> Registers UMEM
-    Daemon->>K8s Node: syscall: bind() -> Binds socket to interface/queue & loads default eBPF
+    Daemon->>K8s Node: libxdp: bind interface/queue and attach default XDP redirect
     Daemon->>Daemon: Listens on UNIX Socket (/var/run/custos/custos.sock)
     
     Worker->>Daemon: Connects to UNIX Socket
@@ -64,6 +64,8 @@ Security is a primary design goal in Phase 4. We implement defense-in-depth acro
   readOnlyRootFilesystem: true
   runAsNonRoot: true
   runAsUser: 10001
+  runAsGroup: 10001
+  fsGroup: 10001
   capabilities:
     drop:
     - ALL
@@ -71,7 +73,7 @@ Security is a primary design goal in Phase 4. We implement defense-in-depth acro
   It has absolutely zero permissions on the host system. It cannot modify routing tables, load kernel modules, or intercept raw traffic on other interfaces.
 
 ### 2. Seccomp Syscall Filtering
-The worker pod is locked down with a custom seccomp profile (`custos-seccomp-profile.json`) which denies all syscalls by default (`SCMP_ACT_ERRNO`) and explicitly allows only the 20 system calls required for AF_XDP ring operations and standard Rust runtime functionality:
+The worker pod is locked down with a custom seccomp profile (`seccomp-profile.json`) which denies all syscalls by default (`SCMP_ACT_ERRNO`) and explicitly allows only the syscall set required for AF_XDP ring operations and standard Rust runtime functionality:
 * `recvmsg` is used to receive the FDs via `SCM_RIGHTS`.
 * `getsockopt` is used to read the XDP ring offsets.
 * `mmap`/`munmap` are used to map the rings and the shared UMEM memfd.
@@ -101,13 +103,13 @@ profile custos-worker-profile flags=(attach_disconnected) {
 
 The `manifests/` directory contains:
 
-1. **`daemonset.yaml`** ([daemonset.yaml](file:///Users/jpvalent/.treehouse/Custos-1475d5/2/Custos/phase4-advanced/k8s-integration/manifests/daemonset.yaml)): Deploying the host daemon. Configures:
+1. **[`daemonset.yaml`](manifests/daemonset.yaml)**: Deploying the host daemon. Configures:
    * `hostNetwork: true` to bind to the host's actual interfaces.
    * `volumeMounts`: Shares `/var/run/custos` with the host (mapped as `DirectoryOrCreate` hostPath) so the Unix Domain Socket is exposed to workers on the same node.
-2. **`deployment.yaml`** ([deployment.yaml](file:///Users/jpvalent/.treehouse/Custos-1475d5/2/Custos/phase4-advanced/k8s-integration/manifests/deployment.yaml)): Deploying the unprivileged worker pods.
+2. **[`deployment.yaml`](manifests/deployment.yaml)**: Deploying the unprivileged worker pods.
    * Mounts the UDS directory.
-   * Defines resource limits and requests, including standard hugepages configuration for high-performance memory translation.
-3. **`seccomp-profile.json`** ([seccomp-profile.json](file:///Users/jpvalent/.treehouse/Custos-1475d5/2/Custos/phase4-advanced/k8s-integration/manifests/seccomp-profile.json)): The strict syscall whitelist profile.
+   * Defines CPU and memory resource limits and requests for the pinned worker loop.
+3. **[`seccomp-profile.json`](manifests/seccomp-profile.json)**: The strict syscall whitelist profile.
 
 ---
 
@@ -151,8 +153,8 @@ This script:
 * **Solution**: Ensure your Linux kernel is updated (recommended `5.15` or above) and verify that the daemon bound the socket successfully without error before passing it.
 
 ### 2. `Permission Denied` when connecting to UDS
-* **Reason**: The daemon is running as `root` and creates the UDS socket file owned by `root:root`. The worker (running as user `10001`) does not have permission to connect to it.
-* **Solution**: The daemon must set permissions of the socket file `/var/run/custos/custos.sock` to `0666` or change the group ownership to match the worker's group ID.
+* **Reason**: The worker runs as user and group `10001` and needs group access to the daemon-created socket.
+* **Solution**: The daemon sets group ownership to `10001` and mode `0660` on `/var/run/custos/custos.sock`; verify the hostPath volume preserves those socket permissions.
 
 ### 3. High CPU usage in worker pod
 * **Reason**: Polling loop is running continuously in a tight `loop` to achieve sub-microsecond latency. This is expected behavior for DPDK/AF_XDP engines.

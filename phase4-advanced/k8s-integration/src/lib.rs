@@ -48,8 +48,7 @@ pub fn send_fds(stream: &UnixStream, fds: &[RawFd]) -> io::Result<()> {
     };
 
     // SAFETY: CMSG_LEN is a safe glibc macro called via libc bindings.
-    let cmsg_len =
-        unsafe { libc::CMSG_LEN((fds.len() * std::mem::size_of::<RawFd>()) as libc::c_uint) };
+    let cmsg_len = unsafe { libc::CMSG_LEN(std::mem::size_of_val(fds) as libc::c_uint) };
     let mut cmsg_buf = vec![0u8; cmsg_len as usize];
 
     let msg = libc::msghdr {
@@ -65,7 +64,7 @@ pub fn send_fds(stream: &UnixStream, fds: &[RawFd]) -> io::Result<()> {
     // SAFETY: We query the first control message header using the msghdr pointer.
     let cmsg = unsafe { libc::CMSG_FIRSTHDR(&msg) };
     if cmsg.is_null() {
-        return Err(io::Error::new(io::ErrorKind::Other, "CMSG_FIRSTHDR failed"));
+        return Err(io::Error::other("CMSG_FIRSTHDR failed"));
     }
 
     // SAFETY: The allocated `cmsg_buf` is guaranteed to be big enough to write the `fds` array.
@@ -111,8 +110,7 @@ pub fn recv_fds(stream: &UnixStream, fds: &mut [RawFd]) -> io::Result<usize> {
     };
 
     // SAFETY: CMSG_LEN is a safe glibc macro called via libc bindings.
-    let cmsg_len =
-        unsafe { libc::CMSG_LEN((fds.len() * std::mem::size_of::<RawFd>()) as libc::c_uint) };
+    let cmsg_len = unsafe { libc::CMSG_LEN(std::mem::size_of_val(fds) as libc::c_uint) };
     let mut cmsg_buf = vec![0u8; cmsg_len as usize];
 
     let mut msg = libc::msghdr {
@@ -135,20 +133,14 @@ pub fn recv_fds(stream: &UnixStream, fds: &mut [RawFd]) -> io::Result<usize> {
     // SAFETY: We query the first control message header using the msghdr pointer.
     let cmsg = unsafe { libc::CMSG_FIRSTHDR(&msg) };
     if cmsg.is_null() {
-        return Err(io::Error::new(
-            io::ErrorKind::Other,
-            "No control message received",
-        ));
+        return Err(io::Error::other("No control message received"));
     }
 
     // SAFETY: We validate the levels, types, and sizes before reading the descriptors.
     // The data is copied safely using `copy_nonoverlapping` into the pre-allocated slice.
     unsafe {
         if (*cmsg).cmsg_level != libc::SOL_SOCKET || (*cmsg).cmsg_type != libc::SCM_RIGHTS {
-            return Err(io::Error::new(
-                io::ErrorKind::Other,
-                "Received invalid control message",
-            ));
+            return Err(io::Error::other("Received invalid control message"));
         }
 
         let data_ptr = libc::CMSG_DATA(cmsg) as *const RawFd;

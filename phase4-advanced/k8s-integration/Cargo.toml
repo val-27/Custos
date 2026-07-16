@@ -13,7 +13,7 @@ path = "src/bin/worker.rs"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 xsk-rs = "0.8.0"
-libxdp-sys = "0.2.4+1.6.0"
+libxdp-sys = "0.2.4"
 custos-protobuf = { path = "../../phase3-protobuf" }
 custos-grpc-basic = { path = "../../phase2-grpc-basic" }
 
