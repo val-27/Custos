@@ -1,0 +1,29 @@
+version: '3.8'
+
+services:
+  custos:
+    build: .
+    image: custos-builder:latest
+    container_name: custos-phase1
+    network_mode: host
+    privileged: true
+    volumes:
+      - .:/workspace
+      - /dev:/dev
+    working_dir: /workspace
+    # Default to forward mode on veth0, pinned to CPU core 0
+    command: ./target/release/custos-phase1-echo --interface veth0 --queue-id 0 --frame-count 2048 --mode forward --verbose
+
+  hammer:
+    build: .
+    image: custos-builder:latest
+    container_name: custos-hammer
+    network_mode: host
+    privileged: true
+    volumes:
+      - .:/workspace
+    working_dir: /workspace
+    # Run the python script to hammer veth1
+    command: python3 tests/hammer.py --interface veth1 --count 50000
+    depends_on:
+      - custos
