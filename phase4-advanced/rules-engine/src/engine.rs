@@ -203,9 +203,13 @@ pub fn walk_message_with_policy(
     if depth > policy.max_recursion_depth {
         return Err(WalkError::Proto(ProtoError::RecursionLimit));
     }
+    if end_offset > buf.len() {
+        return Err(WalkError::Proto(ProtoError::BufferUnderflow));
+    }
 
     while *offset < end_offset {
-        let tag = read_varint(buf, offset, policy.max_varint_bytes).map_err(WalkError::Proto)?;
+        let tag = read_varint(&buf[..end_offset], offset, policy.max_varint_bytes)
+            .map_err(WalkError::Proto)?;
         let field_number = (tag >> 3) as u32;
         let wire_type = (tag & 0x07) as u8;
 
@@ -223,17 +227,18 @@ pub fn walk_message_with_policy(
         if let Some(rule) = policy.shape_rules.get(&field_number) {
             let mut shape = [0i64; 16];
             let mut shape_len = 0;
+            let mut current_wire_type = wire_type;
 
             loop {
-                if wire_type == 2 {
-                    let len = read_varint(buf, offset, policy.max_varint_bytes)
+                if current_wire_type == 2 {
+                    let len = read_varint(&buf[..end_offset], offset, policy.max_varint_bytes)
                         .map_err(WalkError::Proto)? as usize;
                     if *offset + len > end_offset {
                         return Err(WalkError::Proto(ProtoError::BufferUnderflow));
                     }
                     let pack_end = *offset + len;
                     while *offset < pack_end {
-                        let dim = read_varint(buf, offset, policy.max_varint_bytes)
+                        let dim = read_varint(&buf[..pack_end], offset, policy.max_varint_bytes)
                             .map_err(WalkError::Proto)? as i64;
                         if shape_len >= shape.len() {
                             return Err(WalkError::Proto(ProtoError::ShapeDimensionLimit));
@@ -244,8 +249,8 @@ pub fn walk_message_with_policy(
                         shape[shape_len] = dim;
                         shape_len += 1;
                     }
-                } else if wire_type == 0 {
-                    let dim = read_varint(buf, offset, policy.max_varint_bytes)
+                } else if current_wire_type == 0 {
+                    let dim = read_varint(&buf[..end_offset], offset, policy.max_varint_bytes)
                         .map_err(WalkError::Proto)? as i64;
                     if shape_len >= shape.len() {
                         return Err(WalkError::Proto(ProtoError::ShapeDimensionLimit));
@@ -263,18 +268,18 @@ pub fn walk_message_with_policy(
                 if next_offset >= end_offset {
                     break;
                 }
-                let next_tag =
-                    read_varint(buf, offset, policy.max_varint_bytes).map_err(WalkError::Proto)?;
+                let next_tag = read_varint(&buf[..end_offset], offset, policy.max_varint_bytes)
+                    .map_err(WalkError::Proto)?;
                 let next_field_number = (next_tag >> 3) as u32;
                 let next_wire_type = (next_tag & 0x07) as u8;
-                if next_field_number != field_number || next_wire_type != wire_type {
+                if next_field_number != field_number {
                     *offset = next_offset;
                     break;
                 }
-                if next_wire_type != 0 {
-                    *offset = next_offset;
-                    break;
+                if next_wire_type != 0 && next_wire_type != 2 {
+                    return Err(WalkError::Proto(ProtoError::InvalidWireType));
                 }
+                current_wire_type = next_wire_type;
             }
 
             validate_shape(&shape[..shape_len], rule)?;
@@ -282,7 +287,7 @@ pub fn walk_message_with_policy(
             // No shape rule matches.
             // Speculatively walk inside wire type 2 as a sub-message.
             if wire_type == 2 {
-                let len = read_varint(buf, offset, policy.max_varint_bytes)
+                let len = read_varint(&buf[..end_offset], offset, policy.max_varint_bytes)
                     .map_err(WalkError::Proto)? as usize;
                 if *offset + len > end_offset {
                     return Err(WalkError::Proto(ProtoError::BufferUnderflow));
@@ -308,8 +313,13 @@ pub fn walk_message_with_policy(
                     }
                 }
             } else {
-                skip_field(buf, offset, wire_type, policy.max_varint_bytes)
-                    .map_err(WalkError::Proto)?;
+                skip_field(
+                    &buf[..end_offset],
+                    offset,
+                    wire_type,
+                    policy.max_varint_bytes,
+                )
+                .map_err(WalkError::Proto)?;
             }
         }
     }

@@ -329,6 +329,43 @@ fn test_grpc_message_len_bounds_protobuf_walk() {
 }
 
 #[test]
+fn test_grpc_message_len_bounds_scalar_skip() {
+    let mut field_allow_list = HashSet::new();
+    field_allow_list.insert(1);
+
+    let policy = DynamicPolicy::try_from(Policy {
+        version: "1.0.0".to_string(),
+        description: None,
+        allowed_ports: None,
+        blocked_ips: None,
+        protobuf_rules: Some(ProtobufRules {
+            max_varint_bytes: None,
+            max_recursion_depth: None,
+            field_allow_list: Some(field_allow_list),
+            shape_rules: None,
+        }),
+    })
+    .unwrap();
+
+    let payload = vec![0x09, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08];
+    let packet = build_mock_packet_with_message_len(
+        [192, 168, 1, 1],
+        [192, 168, 1, 2],
+        12345,
+        50051,
+        &payload,
+        2,
+    );
+
+    assert_eq!(
+        match_packet(&packet, &policy),
+        MatchResult::Block(BlockReason::InvalidProto(
+            custos_protobuf::ProtoError::BufferUnderflow
+        ))
+    );
+}
+
+#[test]
 fn test_tensor_size_constraints() {
     let policy = DynamicPolicy::try_from(Policy {
         version: "1.0.0".to_string(),
@@ -377,6 +414,23 @@ fn test_tensor_size_constraints() {
         MatchResult::Block(BlockReason::TensorSizeLimitExceeded {
             field: 1,
             got: 16384,
+            limit: 10000
+        })
+    );
+
+    let payload_split_bad = vec![0x0A, 0x02, 0xE8, 0x07, 0x0A, 0x02, 0xE8, 0x07];
+    let packet_split_bad = build_mock_packet(
+        [192, 168, 1, 1],
+        [192, 168, 1, 2],
+        12345,
+        50051,
+        &payload_split_bad,
+    );
+    assert_eq!(
+        match_packet(&packet_split_bad, &policy),
+        MatchResult::Block(BlockReason::TensorSizeLimitExceeded {
+            field: 1,
+            got: 1000000,
             limit: 10000
         })
     );
