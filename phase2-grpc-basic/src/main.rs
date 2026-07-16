@@ -4,20 +4,36 @@
 //! Pins polling thread to a single core, avoids heap allocations in the hot path,
 //! tracks detailed packet types and validation failures, and supports simulated drop rates.
 
+#[cfg(not(target_os = "linux"))]
+fn main() {
+    eprintln!("custos-phase2-grpc-basic requires Linux AF_XDP support");
+    std::process::exit(1);
+}
+
+#[cfg(target_os = "linux")]
 use clap::Parser;
+#[cfg(target_os = "linux")]
 use custos_grpc_basic::{parse_grpc_packet, ParseError, Xorshift};
+#[cfg(target_os = "linux")]
 use std::convert::TryInto;
+#[cfg(target_os = "linux")]
 use std::error::Error;
+#[cfg(target_os = "linux")]
 use std::num::NonZeroU32;
+#[cfg(target_os = "linux")]
 use std::time::Instant;
+#[cfg(target_os = "linux")]
 use tracing::{debug, error, info, trace, Level};
+#[cfg(target_os = "linux")]
 use tracing_subscriber::FmtSubscriber;
+#[cfg(target_os = "linux")]
 use xsk_rs::{
     config::{BindFlags, Interface, SocketConfig, UmemConfigBuilder},
     CompQueue, FillQueue, FrameDesc, RxQueue, Socket, TxQueue, Umem,
 };
 
 /// CLI Arguments for Phase 2.
+#[cfg(target_os = "linux")]
 #[derive(Parser, Debug)]
 #[command(name = "custos-phase2-grpc-basic")]
 #[command(about = "Phase 2: AF_XDP Zero-Copy gRPC Validation Engine", long_about = None)]
@@ -63,6 +79,7 @@ struct Args {
     force_zerocopy: bool,
 }
 
+#[cfg(target_os = "linux")]
 fn main() -> Result<(), Box<dyn Error>> {
     let args = Args::parse();
 
@@ -169,6 +186,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 }
 
 /// The core packet processing loop. Runs with zero heap allocations in the hot path.
+#[cfg(target_os = "linux")]
 fn run_packet_loop(
     args: Args,
     umem: Umem,

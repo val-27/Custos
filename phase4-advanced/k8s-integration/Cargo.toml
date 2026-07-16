@@ -3,6 +3,14 @@ name = "custos-k8s-integration"
 version = "0.1.0"
 edition = "2021"
 
+[[bin]]
+name = "custos-k8s-daemon"
+path = "src/bin/daemon.rs"
+
+[[bin]]
+name = "custos-k8s-worker"
+path = "src/bin/worker.rs"
+
 [target.'cfg(target_os = "linux")'.dependencies]
 xsk-rs = "0.8.0"
 libxdp-sys = "0.2.4+1.6.0"

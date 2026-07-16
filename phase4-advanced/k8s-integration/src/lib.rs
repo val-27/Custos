@@ -190,3 +190,31 @@ pub fn receive_socket_fd(socket_path: &str) -> Result<std::os::unix::io::RawFd, 
     );
     Ok(fds[0])
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{recv_fds, send_fds};
+    use std::fs::File;
+    use std::os::unix::io::AsRawFd;
+    use std::os::unix::net::UnixStream;
+
+    #[test]
+    fn passes_multiple_file_descriptors_over_unix_socket() {
+        let (sender, receiver) = UnixStream::pair().expect("create UnixStream pair");
+        let first = File::open("Cargo.toml").expect("open first descriptor");
+        let second = File::open("Cargo.toml").expect("open second descriptor");
+        let sent = [first.as_raw_fd(), second.as_raw_fd()];
+
+        send_fds(&sender, &sent).expect("send descriptors");
+
+        let mut received = [-1; 2];
+        let count = recv_fds(&receiver, &mut received).expect("receive descriptors");
+
+        assert_eq!(count, sent.len());
+        for fd in received {
+            assert!(fd >= 0);
+            // SAFETY: `recv_fds` returned owned descriptors that this test must close.
+            assert_eq!(unsafe { libc::close(fd) }, 0);
+        }
+    }
+}
