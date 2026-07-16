@@ -26,9 +26,17 @@ pub enum BlockReason {
     /// The Protobuf wire format parsing failed.
     InvalidProto(ProtoError),
     /// The number of shape dimensions (rank) exceeded the maximum allowed limit.
-    ShapeDimensionLimitExceeded { field: u32, got: usize, limit: usize },
+    ShapeDimensionLimitExceeded {
+        field: u32,
+        got: usize,
+        limit: usize,
+    },
     /// The number of shape dimensions (rank) was below the minimum required.
-    ShapeDimensionTooSmall { field: u32, got: usize, limit: usize },
+    ShapeDimensionTooSmall {
+        field: u32,
+        got: usize,
+        limit: usize,
+    },
     /// The total number of elements in the tensor exceeded the limit.
     TensorSizeLimitExceeded { field: u32, got: u64, limit: u64 },
     /// The parsed shape did not match any of the allowed exact shapes.
@@ -57,9 +65,18 @@ pub enum WalkError {
 /// Reasons why a shape constraint check failed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuleViolationReason {
-    DimensionTooSmall { got: usize, limit: usize },
-    DimensionTooLarge { got: usize, limit: usize },
-    TensorSizeExceeded { got: u64, limit: u64 },
+    DimensionTooSmall {
+        got: usize,
+        limit: usize,
+    },
+    DimensionTooLarge {
+        got: usize,
+        limit: usize,
+    },
+    TensorSizeExceeded {
+        got: u64,
+        limit: u64,
+    },
     ExactShapeMismatch,
     DimensionBoundViolation {
         index: usize,
@@ -78,7 +95,10 @@ fn validate_shape(shape: &[i64], rule: &ShapeRule) -> Result<(), WalkError> {
         if shape_len < min_dims {
             return Err(WalkError::ShapeRuleViolation {
                 field_number: rule.field_number,
-                reason: RuleViolationReason::DimensionTooSmall { got: shape_len, limit: min_dims },
+                reason: RuleViolationReason::DimensionTooSmall {
+                    got: shape_len,
+                    limit: min_dims,
+                },
             });
         }
     }
@@ -88,7 +108,10 @@ fn validate_shape(shape: &[i64], rule: &ShapeRule) -> Result<(), WalkError> {
         if shape_len > max_dims {
             return Err(WalkError::ShapeRuleViolation {
                 field_number: rule.field_number,
-                reason: RuleViolationReason::DimensionTooLarge { got: shape_len, limit: max_dims },
+                reason: RuleViolationReason::DimensionTooLarge {
+                    got: shape_len,
+                    limit: max_dims,
+                },
             });
         }
     }
@@ -101,14 +124,20 @@ fn validate_shape(shape: &[i64], rule: &ShapeRule) -> Result<(), WalkError> {
                 product = product.checked_mul(dim as u64).ok_or_else(|| {
                     WalkError::ShapeRuleViolation {
                         field_number: rule.field_number,
-                        reason: RuleViolationReason::TensorSizeExceeded { got: u64::MAX, limit: max_elements },
+                        reason: RuleViolationReason::TensorSizeExceeded {
+                            got: u64::MAX,
+                            limit: max_elements,
+                        },
                     }
                 })?;
             }
             if product > max_elements {
                 return Err(WalkError::ShapeRuleViolation {
                     field_number: rule.field_number,
-                    reason: RuleViolationReason::TensorSizeExceeded { got: product, limit: max_elements },
+                    reason: RuleViolationReason::TensorSizeExceeded {
+                        got: product,
+                        limit: max_elements,
+                    },
                 });
             }
         }
@@ -195,15 +224,29 @@ pub fn walk_message_with_policy(
             let mut shape = [0i64; 16];
             let mut shape_len = 0;
 
-            if wire_type == 2 {
-                // Packed shape: [Length][Varint][Varint]...
-                let len = read_varint(buf, offset, policy.max_varint_bytes).map_err(WalkError::Proto)? as usize;
-                if *offset + len > end_offset {
-                    return Err(WalkError::Proto(ProtoError::BufferUnderflow));
-                }
-                let pack_end = *offset + len;
-                while *offset < pack_end {
-                    let dim = read_varint(buf, offset, policy.max_varint_bytes).map_err(WalkError::Proto)? as i64;
+            loop {
+                if wire_type == 2 {
+                    let len = read_varint(buf, offset, policy.max_varint_bytes)
+                        .map_err(WalkError::Proto)? as usize;
+                    if *offset + len > end_offset {
+                        return Err(WalkError::Proto(ProtoError::BufferUnderflow));
+                    }
+                    let pack_end = *offset + len;
+                    while *offset < pack_end {
+                        let dim = read_varint(buf, offset, policy.max_varint_bytes)
+                            .map_err(WalkError::Proto)? as i64;
+                        if shape_len >= shape.len() {
+                            return Err(WalkError::Proto(ProtoError::ShapeDimensionLimit));
+                        }
+                        if dim <= 0 {
+                            return Err(WalkError::Proto(ProtoError::ShapeValueInvalid));
+                        }
+                        shape[shape_len] = dim;
+                        shape_len += 1;
+                    }
+                } else if wire_type == 0 {
+                    let dim = read_varint(buf, offset, policy.max_varint_bytes)
+                        .map_err(WalkError::Proto)? as i64;
                     if shape_len >= shape.len() {
                         return Err(WalkError::Proto(ProtoError::ShapeDimensionLimit));
                     }
@@ -212,20 +255,26 @@ pub fn walk_message_with_policy(
                     }
                     shape[shape_len] = dim;
                     shape_len += 1;
+                } else {
+                    return Err(WalkError::Proto(ProtoError::InvalidWireType));
                 }
-            } else if wire_type == 0 {
-                // Unpacked shape: [Tag][Varint], [Tag][Varint]...
-                let dim = read_varint(buf, offset, policy.max_varint_bytes).map_err(WalkError::Proto)? as i64;
-                if shape_len >= shape.len() {
-                    return Err(WalkError::Proto(ProtoError::ShapeDimensionLimit));
+
+                let next_offset = *offset;
+                if next_offset >= end_offset {
+                    break;
                 }
-                if dim <= 0 {
-                    return Err(WalkError::Proto(ProtoError::ShapeValueInvalid));
+                let next_tag =
+                    read_varint(buf, offset, policy.max_varint_bytes).map_err(WalkError::Proto)?;
+                let next_field_number = (next_tag >> 3) as u32;
+                let next_wire_type = (next_tag & 0x07) as u8;
+                if next_field_number != field_number || next_wire_type != wire_type {
+                    *offset = next_offset;
+                    break;
                 }
-                shape[shape_len] = dim;
-                shape_len += 1;
-            } else {
-                return Err(WalkError::Proto(ProtoError::InvalidWireType));
+                if next_wire_type != 0 {
+                    *offset = next_offset;
+                    break;
+                }
             }
 
             validate_shape(&shape[..shape_len], rule)?;
@@ -233,7 +282,8 @@ pub fn walk_message_with_policy(
             // No shape rule matches.
             // Speculatively walk inside wire type 2 as a sub-message.
             if wire_type == 2 {
-                let len = read_varint(buf, offset, policy.max_varint_bytes).map_err(WalkError::Proto)? as usize;
+                let len = read_varint(buf, offset, policy.max_varint_bytes)
+                    .map_err(WalkError::Proto)? as usize;
                 if *offset + len > end_offset {
                     return Err(WalkError::Proto(ProtoError::BufferUnderflow));
                 }
@@ -241,13 +291,7 @@ pub fn walk_message_with_policy(
                 let mut sub_offset = *offset;
 
                 // Attempt to recursively parse.
-                match walk_message_with_policy(
-                    buf,
-                    &mut sub_offset,
-                    sub_end,
-                    depth + 1,
-                    policy,
-                ) {
+                match walk_message_with_policy(buf, &mut sub_offset, sub_end, depth + 1, policy) {
                     Ok(()) => {
                         *offset = sub_end;
                     }
@@ -264,7 +308,8 @@ pub fn walk_message_with_policy(
                     }
                 }
             } else {
-                skip_field(buf, offset, wire_type, policy.max_varint_bytes).map_err(WalkError::Proto)?;
+                skip_field(buf, offset, wire_type, policy.max_varint_bytes)
+                    .map_err(WalkError::Proto)?;
             }
         }
     }
@@ -294,30 +339,41 @@ pub fn match_packet(buf: &[u8], policy: &DynamicPolicy) -> MatchResult {
         return MatchResult::Block(BlockReason::BlockedIP(dst_ip));
     }
 
-    // 3. Parse and validate ports
-    let ihl = (buf[14] & 0x0F) as usize;
-    if ihl < 5 {
-        return MatchResult::Block(BlockReason::InvalidPacket);
-    }
-    let ip_hdr_len = ihl * 4;
-    let tcp_offset = 14 + ip_hdr_len;
-    if buf.len() < tcp_offset + 4 {
-        return MatchResult::Block(BlockReason::InvalidPacket);
-    }
+    let has_rules = policy.field_allow_list.is_some() || !policy.shape_rules.is_empty();
+    let needs_tcp = policy.allowed_ports.is_some() || has_rules;
+    let tcp_info = if needs_tcp {
+        if buf[23] != 6 {
+            return MatchResult::Block(BlockReason::InvalidPacket);
+        }
+        let ihl = (buf[14] & 0x0F) as usize;
+        if ihl < 5 {
+            return MatchResult::Block(BlockReason::InvalidPacket);
+        }
+        let ip_hdr_len = ihl * 4;
+        let tcp_offset = 14 + ip_hdr_len;
+        if buf.len() < tcp_offset + 4 {
+            return MatchResult::Block(BlockReason::InvalidPacket);
+        }
 
-    let dst_port = u16::from_be_bytes([buf[tcp_offset + 2], buf[tcp_offset + 3]]);
+        let dst_port = u16::from_be_bytes([buf[tcp_offset + 2], buf[tcp_offset + 3]]);
+        Some((tcp_offset, dst_port))
+    } else {
+        None
+    };
 
     if let Some(ref allowed_ports) = policy.allowed_ports {
+        let Some((_, dst_port)) = tcp_info else {
+            return MatchResult::Block(BlockReason::InvalidPacket);
+        };
         if !allowed_ports.contains(&dst_port) {
             return MatchResult::Block(BlockReason::BlockedPort(dst_port));
         }
     }
 
-    // Check if we need to perform Protobuf / shape verification.
-    // Protobuf checks are performed if we have field allow-lists or shape rules.
-    let has_rules = policy.field_allow_list.is_some() || !policy.shape_rules.is_empty();
-
     if has_rules {
+        let Some((tcp_offset, dst_port)) = tcp_info else {
+            return MatchResult::Block(BlockReason::InvalidPacket);
+        };
         // Parse L2-L5 using zero-copy custos-grpc-basic parser
         let parsed = match parse_grpc_packet(buf, dst_port) {
             Ok(p) => p,
@@ -334,9 +390,15 @@ pub fn match_packet(buf: &[u8], policy: &DynamicPolicy) -> MatchResult {
         let http2_payload_len = ((parsed.http2.length[0] as usize) << 16)
             | ((parsed.http2.length[1] as usize) << 8)
             | (parsed.http2.length[2] as usize);
-        let proto_end = payload_offset + 9 + http2_payload_len;
+        let message_len = parsed.grpc.message_len.get() as usize;
+        let Some(proto_end) = proto_start.checked_add(message_len) else {
+            return MatchResult::Block(BlockReason::InvalidProto(ProtoError::BufferUnderflow));
+        };
 
-        if proto_end > buf.len() {
+        if proto_start > payload_offset + 9 + http2_payload_len
+            || proto_end > payload_offset + 9 + http2_payload_len
+            || proto_end > buf.len()
+        {
             return MatchResult::Block(BlockReason::InvalidProto(ProtoError::BufferUnderflow));
         }
 
@@ -349,29 +411,47 @@ pub fn match_packet(buf: &[u8], policy: &DynamicPolicy) -> MatchResult {
             Err(WalkError::DisallowedField(f)) => {
                 return MatchResult::Block(BlockReason::DisallowedField(f));
             }
-            Err(WalkError::ShapeRuleViolation { field_number, reason }) => {
+            Err(WalkError::ShapeRuleViolation {
+                field_number,
+                reason,
+            }) => {
                 return MatchResult::Block(match reason {
                     RuleViolationReason::DimensionTooSmall { got, limit } => {
-                        BlockReason::ShapeDimensionTooSmall { field: field_number, got, limit }
-                    }
-                    RuleViolationReason::DimensionTooLarge { got, limit } => {
-                        BlockReason::ShapeDimensionLimitExceeded { field: field_number, got, limit }
-                    }
-                    RuleViolationReason::TensorSizeExceeded { got, limit } => {
-                        BlockReason::TensorSizeLimitExceeded { field: field_number, got, limit }
-                    }
-                    RuleViolationReason::ExactShapeMismatch => {
-                        BlockReason::ExactShapeMismatch { field: field_number }
-                    }
-                    RuleViolationReason::DimensionBoundViolation { index, val, min, max } => {
-                        BlockReason::DimensionBoundViolation {
+                        BlockReason::ShapeDimensionTooSmall {
                             field: field_number,
-                            index,
-                            val,
-                            min,
-                            max,
+                            got,
+                            limit,
                         }
                     }
+                    RuleViolationReason::DimensionTooLarge { got, limit } => {
+                        BlockReason::ShapeDimensionLimitExceeded {
+                            field: field_number,
+                            got,
+                            limit,
+                        }
+                    }
+                    RuleViolationReason::TensorSizeExceeded { got, limit } => {
+                        BlockReason::TensorSizeLimitExceeded {
+                            field: field_number,
+                            got,
+                            limit,
+                        }
+                    }
+                    RuleViolationReason::ExactShapeMismatch => BlockReason::ExactShapeMismatch {
+                        field: field_number,
+                    },
+                    RuleViolationReason::DimensionBoundViolation {
+                        index,
+                        val,
+                        min,
+                        max,
+                    } => BlockReason::DimensionBoundViolation {
+                        field: field_number,
+                        index,
+                        val,
+                        min,
+                        max,
+                    },
                 });
             }
         }

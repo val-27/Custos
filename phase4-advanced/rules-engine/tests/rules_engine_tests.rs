@@ -1,6 +1,6 @@
 use custos_rules_engine::{
     match_packet, BlockReason, DimensionBound, DynamicPolicy, MatchResult, Policy, PolicyManager,
-    ShapeRule, ProtobufRules
+    ProtobufRules, ShapeRule,
 };
 use std::collections::HashSet;
 use std::net::Ipv4Addr;
@@ -29,8 +29,8 @@ fn build_mock_packet(
     dst_port: u16,
     proto_payload: &[u8],
 ) -> Vec<u8> {
-    use zerocopy::AsBytes;
     use zerocopy::byteorder::network_endian::{U16, U32};
+    use zerocopy::AsBytes;
 
     let mut buf = vec![0u8; 68 + proto_payload.len()];
 
@@ -99,6 +99,25 @@ fn build_mock_packet(
     buf
 }
 
+fn build_mock_packet_with_message_len(
+    src_ip: [u8; 4],
+    dst_ip: [u8; 4],
+    src_port: u16,
+    dst_port: u16,
+    proto_payload: &[u8],
+    message_len: u32,
+) -> Vec<u8> {
+    use zerocopy::byteorder::network_endian::U32;
+
+    let mut buf = build_mock_packet(src_ip, dst_ip, src_port, dst_port, proto_payload);
+    let grpc = custos_grpc_basic::GrpcHdr {
+        compression_flag: 0,
+        message_len: U32::new(message_len),
+    };
+    buf[63..68].copy_from_slice(zerocopy::AsBytes::as_bytes(&grpc));
+    buf
+}
+
 #[test]
 fn test_ip_and_port_validation() {
     let mut allowed_ports = HashSet::new();
@@ -133,6 +152,13 @@ fn test_ip_and_port_validation() {
         match_packet(&packet_bad_port, &policy),
         MatchResult::Block(BlockReason::BlockedPort(8080))
     );
+
+    let mut packet_udp = build_mock_packet([192, 168, 1, 1], [192, 168, 1, 2], 12345, 50051, &[]);
+    packet_udp[23] = 17;
+    assert_eq!(
+        match_packet(&packet_udp, &policy),
+        MatchResult::Block(BlockReason::InvalidPacket)
+    );
 }
 
 #[test]
@@ -157,12 +183,24 @@ fn test_field_allow_list() {
     // Field 1 tag: (1 << 3) | 0 = 8 (Varint)
     // Value: 42
     let payload_ok = vec![0x08, 0x2A];
-    let packet_ok = build_mock_packet([192, 168, 1, 1], [192, 168, 1, 2], 12345, 50051, &payload_ok);
+    let packet_ok = build_mock_packet(
+        [192, 168, 1, 1],
+        [192, 168, 1, 2],
+        12345,
+        50051,
+        &payload_ok,
+    );
     assert_eq!(match_packet(&packet_ok, &policy), MatchResult::Allow);
 
     // Field 2 tag: (2 << 3) | 0 = 16 (Varint)
     let payload_bad = vec![0x10, 0x2A];
-    let packet_bad = build_mock_packet([192, 168, 1, 1], [192, 168, 1, 2], 12345, 50051, &payload_bad);
+    let packet_bad = build_mock_packet(
+        [192, 168, 1, 1],
+        [192, 168, 1, 2],
+        12345,
+        50051,
+        &payload_bad,
+    );
     assert_eq!(
         match_packet(&packet_bad, &policy),
         MatchResult::Block(BlockReason::DisallowedField(2))
@@ -197,14 +235,26 @@ fn test_shape_dimension_bounds() {
     // Length: 4 bytes
     // Values: 128 (0x80, 0x01), 128 (0x80, 0x01)
     let payload_ok = vec![0x0A, 0x04, 0x80, 0x01, 0x80, 0x01];
-    let packet_ok = build_mock_packet([192, 168, 1, 1], [192, 168, 1, 2], 12345, 50051, &payload_ok);
+    let packet_ok = build_mock_packet(
+        [192, 168, 1, 1],
+        [192, 168, 1, 2],
+        12345,
+        50051,
+        &payload_ok,
+    );
     assert_eq!(match_packet(&packet_ok, &policy), MatchResult::Allow);
 
     // 2. Packed Shape [224] -> 1 dimension (Too small)
     // Length: 2 bytes
     // Values: 224 (0xE0, 0x01)
     let payload_too_small = vec![0x0A, 0x02, 0xE0, 0x01];
-    let packet_too_small = build_mock_packet([192, 168, 1, 1], [192, 168, 1, 2], 12345, 50051, &payload_too_small);
+    let packet_too_small = build_mock_packet(
+        [192, 168, 1, 1],
+        [192, 168, 1, 2],
+        12345,
+        50051,
+        &payload_too_small,
+    );
     assert_eq!(
         match_packet(&packet_too_small, &policy),
         MatchResult::Block(BlockReason::ShapeDimensionTooSmall {
@@ -216,7 +266,13 @@ fn test_shape_dimension_bounds() {
 
     // 3. Packed Shape [1, 3, 224, 224, 224] -> 5 dimensions (Too large)
     let payload_too_large = vec![0x0A, 0x07, 0x01, 0x03, 0xE0, 0x01, 0xE0, 0x01, 0xE0, 0x01];
-    let packet_too_large = build_mock_packet([192, 168, 1, 1], [192, 168, 1, 2], 12345, 50051, &payload_too_large);
+    let packet_too_large = build_mock_packet(
+        [192, 168, 1, 1],
+        [192, 168, 1, 2],
+        12345,
+        50051,
+        &payload_too_large,
+    );
     assert_eq!(
         match_packet(&packet_too_large, &policy),
         MatchResult::Block(BlockReason::ShapeDimensionLimitExceeded {
@@ -225,6 +281,51 @@ fn test_shape_dimension_bounds() {
             limit: 4
         })
     );
+
+    let payload_unpacked_ok = vec![0x08, 0x80, 0x01, 0x08, 0x80, 0x01];
+    let packet_unpacked_ok = build_mock_packet(
+        [192, 168, 1, 1],
+        [192, 168, 1, 2],
+        12345,
+        50051,
+        &payload_unpacked_ok,
+    );
+    assert_eq!(
+        match_packet(&packet_unpacked_ok, &policy),
+        MatchResult::Allow
+    );
+}
+
+#[test]
+fn test_grpc_message_len_bounds_protobuf_walk() {
+    let mut field_allow_list = HashSet::new();
+    field_allow_list.insert(1);
+
+    let policy = DynamicPolicy::try_from(Policy {
+        version: "1.0.0".to_string(),
+        description: None,
+        allowed_ports: None,
+        blocked_ips: None,
+        protobuf_rules: Some(ProtobufRules {
+            max_varint_bytes: None,
+            max_recursion_depth: None,
+            field_allow_list: Some(field_allow_list),
+            shape_rules: None,
+        }),
+    })
+    .unwrap();
+
+    let payload = vec![0x08, 0x2A, 0x10, 0x2A];
+    let packet = build_mock_packet_with_message_len(
+        [192, 168, 1, 1],
+        [192, 168, 1, 2],
+        12345,
+        50051,
+        &payload,
+        2,
+    );
+
+    assert_eq!(match_packet(&packet, &policy), MatchResult::Allow);
 }
 
 #[test]
@@ -252,13 +353,25 @@ fn test_tensor_size_constraints() {
 
     // [64, 64] = 4096 (OK)
     let payload_ok = vec![0x0A, 0x02, 0x40, 0x40];
-    let packet_ok = build_mock_packet([192, 168, 1, 1], [192, 168, 1, 2], 12345, 50051, &payload_ok);
+    let packet_ok = build_mock_packet(
+        [192, 168, 1, 1],
+        [192, 168, 1, 2],
+        12345,
+        50051,
+        &payload_ok,
+    );
     assert_eq!(match_packet(&packet_ok, &policy), MatchResult::Allow);
 
     // [128, 128] = 16384 (Too large)
     // 128 in varint: 0x80, 0x01
     let payload_bad = vec![0x0A, 0x04, 0x80, 0x01, 0x80, 0x01];
-    let packet_bad = build_mock_packet([192, 168, 1, 1], [192, 168, 1, 2], 12345, 50051, &payload_bad);
+    let packet_bad = build_mock_packet(
+        [192, 168, 1, 1],
+        [192, 168, 1, 2],
+        12345,
+        50051,
+        &payload_bad,
+    );
     assert_eq!(
         match_packet(&packet_bad, &policy),
         MatchResult::Block(BlockReason::TensorSizeLimitExceeded {
@@ -294,12 +407,24 @@ fn test_exact_shapes() {
 
     // Shape [1, 3, 224, 224] (OK)
     let payload_ok = vec![0x0A, 0x06, 0x01, 0x03, 0xE0, 0x01, 0xE0, 0x01];
-    let packet_ok = build_mock_packet([192, 168, 1, 1], [192, 168, 1, 2], 12345, 50051, &payload_ok);
+    let packet_ok = build_mock_packet(
+        [192, 168, 1, 1],
+        [192, 168, 1, 2],
+        12345,
+        50051,
+        &payload_ok,
+    );
     assert_eq!(match_packet(&packet_ok, &policy), MatchResult::Allow);
 
     // Shape [1, 3, 128, 128] (Mismatch)
     let payload_bad = vec![0x0A, 0x06, 0x01, 0x03, 0x80, 0x01, 0x80, 0x01];
-    let packet_bad = build_mock_packet([192, 168, 1, 1], [192, 168, 1, 2], 12345, 50051, &payload_bad);
+    let packet_bad = build_mock_packet(
+        [192, 168, 1, 1],
+        [192, 168, 1, 2],
+        12345,
+        50051,
+        &payload_bad,
+    );
     assert_eq!(
         match_packet(&packet_bad, &policy),
         MatchResult::Block(BlockReason::ExactShapeMismatch { field: 1 })
@@ -342,12 +467,24 @@ fn test_dimension_index_bounds() {
 
     // Shape [4, 3, 224, 224] (OK)
     let payload_ok = vec![0x0A, 0x06, 0x04, 0x03, 0xE0, 0x01, 0xE0, 0x01];
-    let packet_ok = build_mock_packet([192, 168, 1, 1], [192, 168, 1, 2], 12345, 50051, &payload_ok);
+    let packet_ok = build_mock_packet(
+        [192, 168, 1, 1],
+        [192, 168, 1, 2],
+        12345,
+        50051,
+        &payload_ok,
+    );
     assert_eq!(match_packet(&packet_ok, &policy), MatchResult::Allow);
 
     // Shape [16, 3, 224, 224] (Batch size 16 exceeds limit 8)
     let payload_bad_batch = vec![0x0A, 0x06, 0x10, 0x03, 0xE0, 0x01, 0xE0, 0x01];
-    let packet_bad_batch = build_mock_packet([192, 168, 1, 1], [192, 168, 1, 2], 12345, 50051, &payload_bad_batch);
+    let packet_bad_batch = build_mock_packet(
+        [192, 168, 1, 1],
+        [192, 168, 1, 2],
+        12345,
+        50051,
+        &payload_bad_batch,
+    );
     assert_eq!(
         match_packet(&packet_bad_batch, &policy),
         MatchResult::Block(BlockReason::DimensionBoundViolation {
@@ -361,7 +498,13 @@ fn test_dimension_index_bounds() {
 
     // Shape [4, 1, 224, 224] (Channels size 1 is below limit 3)
     let payload_bad_chan = vec![0x0A, 0x06, 0x04, 0x01, 0xE0, 0x01, 0xE0, 0x01];
-    let packet_bad_chan = build_mock_packet([192, 168, 1, 1], [192, 168, 1, 2], 12345, 50051, &payload_bad_chan);
+    let packet_bad_chan = build_mock_packet(
+        [192, 168, 1, 1],
+        [192, 168, 1, 2],
+        12345,
+        50051,
+        &payload_bad_chan,
+    );
     assert_eq!(
         match_packet(&packet_bad_chan, &policy),
         MatchResult::Block(BlockReason::DimensionBoundViolation {
@@ -404,7 +547,10 @@ fn test_policy_manager_hot_reload() {
     let packet = build_mock_packet([192, 168, 1, 1], [192, 168, 1, 2], 12345, 50051, &payload);
 
     // Match against current policy (OK)
-    assert_eq!(match_packet(&packet, &manager.get_policy()), MatchResult::Allow);
+    assert_eq!(
+        match_packet(&packet, &manager.get_policy()),
+        MatchResult::Allow
+    );
 
     // Swap/reload with version 2 policy restricting Rank <= 2
     let policy_v2 = DynamicPolicy::try_from(Policy {
@@ -472,7 +618,10 @@ fn test_policy_parsing_json_toml() {
     let policy_toml = Policy::from_toml(toml_str).unwrap();
     assert_eq!(policy_toml.version, "1.1.0");
     assert!(policy_toml.allowed_ports.unwrap().contains(&50051));
-    assert!(policy_toml.blocked_ips.unwrap().contains(&Ipv4Addr::new(10, 0, 0, 1)));
+    assert!(policy_toml
+        .blocked_ips
+        .unwrap()
+        .contains(&Ipv4Addr::new(10, 0, 0, 1)));
 
     let json_str = r#"{
         "version": "1.2.0",
@@ -496,5 +645,8 @@ fn test_policy_parsing_json_toml() {
 
     let policy_json = Policy::from_json(json_str).unwrap();
     assert_eq!(policy_json.version, "1.2.0");
-    assert_eq!(policy_json.protobuf_rules.unwrap().max_varint_bytes, Some(10));
+    assert_eq!(
+        policy_json.protobuf_rules.unwrap().max_varint_bytes,
+        Some(10)
+    );
 }
