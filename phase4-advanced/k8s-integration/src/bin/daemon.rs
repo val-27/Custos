@@ -7,12 +7,12 @@
 //! and passes the resulting file descriptors (socket and memfd) to the unprivileged worker
 //! over a Unix domain socket.
 
-
 use clap::Parser;
 use custos_k8s_integration::{send_fds, WorkerConfig};
 use std::error::Error;
 use std::fs;
 use std::io::{self, Write};
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::io::RawFd;
 use std::os::unix::net::UnixListener;
 use std::path::Path;
@@ -71,7 +71,9 @@ fn create_shared_mem_fd(size: usize) -> io::Result<RawFd> {
         // SAFETY: Resizing the memfd via ftruncate.
         let res = unsafe { libc::ftruncate(fd, size as libc::off_t) };
         if res < 0 {
-            unsafe { libc::close(fd); }
+            unsafe {
+                libc::close(fd);
+            }
             return Err(io::Error::last_os_error());
         }
         Ok(fd)
@@ -93,11 +95,15 @@ fn create_shared_mem_fd(size: usize) -> io::Result<RawFd> {
         // SAFETY: Resizing file via ftruncate.
         let res = unsafe { libc::ftruncate(fd, size as libc::off_t) };
         if res < 0 {
-            unsafe { libc::close(fd); }
+            unsafe {
+                libc::close(fd);
+            }
             return Err(io::Error::last_os_error());
         }
         // SAFETY: Unlinking file so it deletes on close.
-        unsafe { libc::unlink(path.as_ptr()); }
+        unsafe {
+            libc::unlink(path.as_ptr());
+        }
         Ok(fd)
     }
 }
@@ -119,7 +125,11 @@ mod linux {
         // SAFETY: socket is called with AF_XDP and SOCK_RAW.
         let fd = unsafe { libc::socket(libc::AF_XDP, libc::SOCK_RAW, 0) };
         if fd < 0 {
-            return Err(format!("Failed to create AF_XDP socket: {}", io::Error::last_os_error()).into());
+            return Err(format!(
+                "Failed to create AF_XDP socket: {}",
+                io::Error::last_os_error()
+            )
+            .into());
         }
         let socket_fd = fd;
         info!("Created AF_XDP socket FD: {}", socket_fd);
@@ -160,7 +170,11 @@ mod linux {
             )
         };
         if res < 0 {
-            return Err(format!("Failed to set UMEM Fill ring size: {}", io::Error::last_os_error()).into());
+            return Err(format!(
+                "Failed to set UMEM Fill ring size: {}",
+                io::Error::last_os_error()
+            )
+            .into());
         }
         // SAFETY: setsockopt sets Completion ring size
         let res = unsafe {
@@ -173,7 +187,11 @@ mod linux {
             )
         };
         if res < 0 {
-            return Err(format!("Failed to set UMEM Completion ring size: {}", io::Error::last_os_error()).into());
+            return Err(format!(
+                "Failed to set UMEM Completion ring size: {}",
+                io::Error::last_os_error()
+            )
+            .into());
         }
         // SAFETY: setsockopt sets RX ring size
         let res = unsafe {
@@ -186,7 +204,9 @@ mod linux {
             )
         };
         if res < 0 {
-            return Err(format!("Failed to set RX ring size: {}", io::Error::last_os_error()).into());
+            return Err(
+                format!("Failed to set RX ring size: {}", io::Error::last_os_error()).into(),
+            );
         }
         // SAFETY: setsockopt sets TX ring size
         let res = unsafe {
@@ -199,11 +219,19 @@ mod linux {
             )
         };
         if res < 0 {
-            return Err(format!("Failed to set TX ring size: {}", io::Error::last_os_error()).into());
+            return Err(
+                format!("Failed to set TX ring size: {}", io::Error::last_os_error()).into(),
+            );
         }
 
         // 4. Bind socket to interface and queue
-        let if_index = unsafe { libc::if_nametoindex(std::ffi::CString::new(args.interface.clone()).unwrap().as_ptr()) };
+        let if_index = unsafe {
+            libc::if_nametoindex(
+                std::ffi::CString::new(args.interface.clone())
+                    .unwrap()
+                    .as_ptr(),
+            )
+        };
         if if_index == 0 {
             return Err(format!("Failed to find interface index for '{}'", args.interface).into());
         }
@@ -228,9 +256,16 @@ mod linux {
             )
         };
         if res < 0 {
-            return Err(format!("Failed to bind AF_XDP socket: {}", io::Error::last_os_error()).into());
+            return Err(format!(
+                "Failed to bind AF_XDP socket: {}",
+                io::Error::last_os_error()
+            )
+            .into());
         }
-        info!("AF_XDP socket bound to interface '{}' (index {}), queue {}", args.interface, if_index, args.queue_id);
+        info!(
+            "AF_XDP socket bound to interface '{}' (index {}), queue {}",
+            args.interface, if_index, args.queue_id
+        );
 
         Ok(socket_fd)
     }
@@ -239,7 +274,11 @@ mod linux {
 fn main() -> Result<(), Box<dyn Error>> {
     let args = Args::parse();
 
-    let log_level = if args.verbose { Level::DEBUG } else { Level::INFO };
+    let log_level = if args.verbose {
+        Level::DEBUG
+    } else {
+        Level::INFO
+    };
     let subscriber = FmtSubscriber::builder().with_max_level(log_level).finish();
     tracing::subscriber::set_global_default(subscriber)?;
 
@@ -266,7 +305,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     if umem_addr == libc::MAP_FAILED {
         return Err(format!("mmap of memfd failed: {}", io::Error::last_os_error()).into());
     }
-    info!("Shared UMEM mapped in daemon at virtual address: {:?}", umem_addr);
+    info!(
+        "Shared UMEM mapped in daemon at virtual address: {:?}",
+        umem_addr
+    );
 
     // Create AF_XDP socket & register UMEM
     let socket_fd: RawFd;
@@ -296,7 +338,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 
     let listener = UnixListener::bind(socket_path)?;
-    info!("Unix Domain Socket server listening on: {}", args.socket_path);
+    fs::set_permissions(socket_path, fs::Permissions::from_mode(0o666))?;
+    info!(
+        "Unix Domain Socket server listening on: {}",
+        args.socket_path
+    );
 
     // Prepare worker configuration to send first
     let worker_config = WorkerConfig {
@@ -321,7 +367,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 let config_str = serde_json::to_string(&worker_config)?;
                 let mut config_bytes = config_str.as_bytes().to_vec();
                 config_bytes.push(b'\n'); // Newline delimiter
-                
+
                 if let Err(e) = stream.write_all(&config_bytes) {
                     error!("Failed to write configuration to worker: {}", e);
                     continue;
@@ -332,7 +378,10 @@ fn main() -> Result<(), Box<dyn Error>> {
                 let fds_to_send = [socket_fd, memfd];
                 match send_fds(&stream, &fds_to_send) {
                     Ok(_) => {
-                        info!("Successfully passed socket FD ({}) and UMEM memfd ({}) to worker", socket_fd, memfd);
+                        info!(
+                            "Successfully passed socket FD ({}) and UMEM memfd ({}) to worker",
+                            socket_fd, memfd
+                        );
                     }
                     Err(e) => {
                         error!("Failed to pass file descriptors to worker: {}", e);

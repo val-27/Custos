@@ -6,11 +6,10 @@
 //! maps the socket rings (RX, TX, Fill, Completion), pins the thread to the specified CPU core,
 //! and runs the high-performance packet processing loop zero-copy.
 
-
 use clap::Parser;
 use custos_k8s_integration::{recv_fds, WorkerConfig};
 use std::error::Error;
-use std::io::{self, BufRead, BufReader};
+use std::io::{self, Read};
 use std::os::unix::io::RawFd;
 use std::os::unix::net::UnixStream;
 use std::ptr;
@@ -43,7 +42,7 @@ pub struct Args {
 #[cfg(target_os = "linux")]
 mod linux {
     use super::*;
-    use custos_protobuf::{validate_grpc_protobuf_packet, ValidationError, ValidationConfig};
+    use custos_protobuf::{validate_grpc_protobuf_packet, ValidationConfig, ValidationError};
 
     /// Maps the AF_XDP rings from the socket file descriptor on Linux.
     ///
@@ -78,7 +77,8 @@ mod linux {
         // SAFETY: mmap is called with valid size and offset (XDP_PGOFF_RX_RING = 0)
         let rx_map = libc::mmap(
             std::ptr::null_mut(),
-            (off.rx.desc + config.rx_size * std::mem::size_of::<libxdp_sys::xdp_desc>() as u32) as usize,
+            (off.rx.desc + config.rx_size * std::mem::size_of::<libxdp_sys::xdp_desc>() as u32)
+                as usize,
             libc::PROT_READ | libc::PROT_WRITE,
             libc::MAP_SHARED,
             fd,
@@ -92,7 +92,8 @@ mod linux {
         // SAFETY: mmap is called with valid size and offset (XDP_PGOFF_TX_RING = 0x80000000)
         let tx_map = libc::mmap(
             std::ptr::null_mut(),
-            (off.tx.desc + config.tx_size * std::mem::size_of::<libxdp_sys::xdp_desc>() as u32) as usize,
+            (off.tx.desc + config.tx_size * std::mem::size_of::<libxdp_sys::xdp_desc>() as u32)
+                as usize,
             libc::PROT_READ | libc::PROT_WRITE,
             libc::MAP_SHARED,
             fd,
@@ -190,29 +191,40 @@ mod linux {
     ) -> Result<(), Box<dyn Error>> {
         // Initialize rings
         // SAFETY: We pass validated FDs and configuration structures.
-        let (mut rx_ring, mut tx_ring, mut fill_ring, mut comp_ring) = unsafe { map_rings(socket_fd, config)? };
+        let (mut rx_ring, mut tx_ring, mut fill_ring, mut comp_ring) =
+            unsafe { map_rings(socket_fd, config)? };
         info!("AF_XDP RX, TX, Fill, and Completion rings mapped successfully");
 
         // Populate Fill Ring with all available frames initially
         let mut idx: u32 = 0;
         // SAFETY: xsk_ring_prod__reserve is a C helper to allocate fill slots.
-        let reserved = unsafe { libxdp_sys::xsk_ring_prod__reserve(&mut fill_ring, config.fill_size, &mut idx) };
+        let reserved = unsafe {
+            libxdp_sys::xsk_ring_prod__reserve(&mut fill_ring, config.fill_size, &mut idx)
+        };
         if reserved != config.fill_size {
             return Err("Failed to populate initial Fill ring slots".into());
         }
         for i in 0..reserved {
             // SAFETY: fill_addr fetches the address slot reference.
-            let fill_addr = unsafe { libxdp_sys::xsk_ring_prod__fill_addr(&mut fill_ring, idx + i) };
-            unsafe { *fill_addr = (i as u64) * config.frame_size as u64; }
+            let fill_addr =
+                unsafe { libxdp_sys::xsk_ring_prod__fill_addr(&mut fill_ring, idx + i) };
+            unsafe {
+                *fill_addr = (i as u64) * config.frame_size as u64;
+            }
         }
         // SAFETY: Submit the initial fill slots to hardware.
-        unsafe { libxdp_sys::xsk_ring_prod__submit(&mut fill_ring, reserved); }
+        unsafe {
+            libxdp_sys::xsk_ring_prod__submit(&mut fill_ring, reserved);
+        }
         info!("Populated Fill Queue with {} frames", reserved);
 
         // Set validation config
         let mut validation_config = ValidationConfig::default();
         validation_config.target_port = config.target_port;
-        info!("Protobuf Validation Rules target_port: {}", validation_config.target_port);
+        info!(
+            "Protobuf Validation Rules target_port: {}",
+            validation_config.target_port
+        );
 
         // Stats tracking
         let mut rx_packets: u64 = 0;
@@ -227,14 +239,16 @@ mod linux {
             // A. Consume received packets from RX Ring
             let mut rx_idx: u32 = 0;
             // SAFETY: Peek consumption slots in RX Ring.
-            let received = unsafe { libxdp_sys::xsk_ring_cons__peek(&mut rx_ring, BATCH_SIZE, &mut rx_idx) };
+            let received =
+                unsafe { libxdp_sys::xsk_ring_cons__peek(&mut rx_ring, BATCH_SIZE, &mut rx_idx) };
 
             if received > 0 {
                 rx_packets += received as u64;
 
                 for i in 0..received {
                     // SAFETY: rx_desc fetches descriptor pointer.
-                    let rx_desc = unsafe { libxdp_sys::xsk_ring_cons__rx_desc(&rx_ring, rx_idx + i) };
+                    let rx_desc =
+                        unsafe { libxdp_sys::xsk_ring_cons__rx_desc(&rx_ring, rx_idx + i) };
                     let offset = unsafe { (*rx_desc).addr as usize };
                     let len = unsafe { (*rx_desc).len as usize };
 
@@ -252,7 +266,10 @@ mod linux {
                                 // Swap source and destination MACs in-place
                                 // SAFETY: We have exclusive access to the packet payload slice.
                                 let contents = unsafe {
-                                    std::slice::from_raw_parts_mut((umem_addr as usize + offset) as *mut u8, len)
+                                    std::slice::from_raw_parts_mut(
+                                        (umem_addr as usize + offset) as *mut u8,
+                                        len,
+                                    )
                                 };
                                 if contents.len() >= 12 {
                                     let mut mac_dst = [0u8; 6];
@@ -267,27 +284,48 @@ mod linux {
                             // Submit packet to TX Ring
                             let mut tx_idx: u32 = 0;
                             // SAFETY: Reserve a slot in TX ring.
-                            let reserved = unsafe { libxdp_sys::xsk_ring_prod__reserve(&mut tx_ring, 1, &mut tx_idx) };
+                            let reserved = unsafe {
+                                libxdp_sys::xsk_ring_prod__reserve(&mut tx_ring, 1, &mut tx_idx)
+                            };
                             if reserved > 0 {
                                 // SAFETY: Retrieve TX descriptor reference.
-                                let tx_desc = unsafe { libxdp_sys::xsk_ring_prod__tx_desc(&mut tx_ring, tx_idx) };
+                                let tx_desc = unsafe {
+                                    libxdp_sys::xsk_ring_prod__tx_desc(&mut tx_ring, tx_idx)
+                                };
                                 unsafe {
                                     (*tx_desc).addr = offset as u64;
                                     (*tx_desc).len = len as u32;
                                     (*tx_desc).options = 0;
                                 }
                                 // SAFETY: Submit slot to hardware ring.
-                                unsafe { libxdp_sys::xsk_ring_prod__submit(&mut tx_ring, 1); }
+                                unsafe {
+                                    libxdp_sys::xsk_ring_prod__submit(&mut tx_ring, 1);
+                                }
                                 tx_packets += 1;
                             } else {
                                 // Fallback to recycling directly if TX ring is full
                                 let mut fill_idx: u32 = 0;
                                 // SAFETY: Recycle frame back to Fill ring.
-                                let res_fill = unsafe { libxdp_sys::xsk_ring_prod__reserve(&mut fill_ring, 1, &mut fill_idx) };
+                                let res_fill = unsafe {
+                                    libxdp_sys::xsk_ring_prod__reserve(
+                                        &mut fill_ring,
+                                        1,
+                                        &mut fill_idx,
+                                    )
+                                };
                                 if res_fill > 0 {
-                                    let fill_addr = unsafe { libxdp_sys::xsk_ring_prod__fill_addr(&mut fill_ring, fill_idx) };
-                                    unsafe { *fill_addr = offset as u64; }
-                                    unsafe { libxdp_sys::xsk_ring_prod__submit(&mut fill_ring, 1); }
+                                    let fill_addr = unsafe {
+                                        libxdp_sys::xsk_ring_prod__fill_addr(
+                                            &mut fill_ring,
+                                            fill_idx,
+                                        )
+                                    };
+                                    unsafe {
+                                        *fill_addr = offset as u64;
+                                    }
+                                    unsafe {
+                                        libxdp_sys::xsk_ring_prod__submit(&mut fill_ring, 1);
+                                    }
                                 }
                                 drop_packets += 1;
                             }
@@ -295,48 +333,71 @@ mod linux {
                         Err(e) => {
                             // Validation failed! Log drop reason (ignoring payloads for privacy) and recycle
                             trace!("Packet validation failed: {:?}. Dropping packet.", e);
-                            
+
                             let mut fill_idx: u32 = 0;
                             // SAFETY: Recycle frame back to Fill ring.
-                            let res_fill = unsafe { libxdp_sys::xsk_ring_prod__reserve(&mut fill_ring, 1, &mut fill_idx) };
+                            let res_fill = unsafe {
+                                libxdp_sys::xsk_ring_prod__reserve(&mut fill_ring, 1, &mut fill_idx)
+                            };
                             if res_fill > 0 {
-                                let fill_addr = unsafe { libxdp_sys::xsk_ring_prod__fill_addr(&mut fill_ring, fill_idx) };
-                                unsafe { *fill_addr = offset as u64; }
-                                unsafe { libxdp_sys::xsk_ring_prod__submit(&mut fill_ring, 1); }
+                                let fill_addr = unsafe {
+                                    libxdp_sys::xsk_ring_prod__fill_addr(&mut fill_ring, fill_idx)
+                                };
+                                unsafe {
+                                    *fill_addr = offset as u64;
+                                }
+                                unsafe {
+                                    libxdp_sys::xsk_ring_prod__submit(&mut fill_ring, 1);
+                                }
                             }
                             drop_packets += 1;
                         }
                     }
                 }
                 // SAFETY: Release consumed slots.
-                unsafe { libxdp_sys::xsk_ring_cons__release(&mut rx_ring, received); }
+                unsafe {
+                    libxdp_sys::xsk_ring_cons__release(&mut rx_ring, received);
+                }
             }
 
             // B. Reclaim completed TX frames from Completion Ring and return to Fill Ring
             let mut comp_idx: u32 = 0;
             // SAFETY: Peek Completion queue.
-            let completed = unsafe { libxdp_sys::xsk_ring_cons__peek(&mut comp_ring, BATCH_SIZE, &mut comp_idx) };
+            let completed = unsafe {
+                libxdp_sys::xsk_ring_cons__peek(&mut comp_ring, BATCH_SIZE, &mut comp_idx)
+            };
             if completed > 0 {
-                recycled_packets += completed as u64;
-
                 let mut fill_idx: u32 = 0;
                 // SAFETY: Reserve slots to recycle frames.
-                let reserved = unsafe { libxdp_sys::xsk_ring_prod__reserve(&mut fill_ring, completed, &mut fill_idx) };
+                let reserved = unsafe {
+                    libxdp_sys::xsk_ring_prod__reserve(&mut fill_ring, completed, &mut fill_idx)
+                };
                 if reserved > 0 {
                     for i in 0..reserved {
                         // SAFETY: Read completed address offset.
-                        let comp_addr = unsafe { libxdp_sys::xsk_ring_cons__comp_addr(&comp_ring, comp_idx + i) };
+                        let comp_addr = unsafe {
+                            libxdp_sys::xsk_ring_cons__comp_addr(&comp_ring, comp_idx + i)
+                        };
                         let completed_offset = unsafe { *comp_addr };
 
                         // SAFETY: Write slot in Fill queue.
-                        let fill_addr = unsafe { libxdp_sys::xsk_ring_prod__fill_addr(&mut fill_ring, fill_idx + i) };
-                        unsafe { *fill_addr = completed_offset; }
+                        let fill_addr = unsafe {
+                            libxdp_sys::xsk_ring_prod__fill_addr(&mut fill_ring, fill_idx + i)
+                        };
+                        unsafe {
+                            *fill_addr = completed_offset;
+                        }
                     }
                     // SAFETY: Submit recycled slots.
-                    unsafe { libxdp_sys::xsk_ring_prod__submit(&mut fill_ring, reserved); }
+                    unsafe {
+                        libxdp_sys::xsk_ring_prod__submit(&mut fill_ring, reserved);
+                    }
+                    recycled_packets += reserved as u64;
+                    // SAFETY: Release only completion slots recycled into the fill ring.
+                    unsafe {
+                        libxdp_sys::xsk_ring_cons__release(&mut comp_ring, reserved);
+                    }
                 }
-                // SAFETY: Release completion slots.
-                unsafe { libxdp_sys::xsk_ring_cons__release(&mut comp_ring, completed); }
             }
 
             // C. Wakeups if needed
@@ -381,7 +442,11 @@ mod linux {
 fn main() -> Result<(), Box<dyn Error>> {
     let args = Args::parse();
 
-    let log_level = if args.verbose { Level::DEBUG } else { Level::INFO };
+    let log_level = if args.verbose {
+        Level::DEBUG
+    } else {
+        Level::INFO
+    };
     let subscriber = FmtSubscriber::builder().with_max_level(log_level).finish();
     tracing::subscriber::set_global_default(subscriber)?;
 
@@ -393,12 +458,15 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     // Connect to host daemon's UDS
     info!("Connecting to host daemon UDS at: {}", args.socket_path);
-    let stream = UnixStream::connect(&args.socket_path)?;
-    let mut reader = BufReader::new(&stream);
+    let mut stream = UnixStream::connect(&args.socket_path)?;
 
     // 1. Read JSON configuration
     let mut config_line = String::new();
-    reader.read_line(&mut config_line)?;
+    let mut byte = [0u8; 1];
+    while byte[0] != b'\n' {
+        stream.read_exact(&mut byte)?;
+        config_line.push(byte[0] as char);
+    }
     let config: WorkerConfig = serde_json::from_str(&config_line)?;
     info!("Received WorkerConfig from daemon: {:?}", config);
 
@@ -428,7 +496,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     if umem_addr == libc::MAP_FAILED {
         return Err(format!("mmap of memfd failed: {}", io::Error::last_os_error()).into());
     }
-    info!("Shared UMEM mapped in worker at virtual address: {:?}", umem_addr);
+    info!(
+        "Shared UMEM mapped in worker at virtual address: {:?}",
+        umem_addr
+    );
 
     #[cfg(target_os = "linux")]
     {
