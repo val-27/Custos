@@ -60,14 +60,8 @@ spec:
         volumeMounts:
         - name: socket-dir
           mountPath: /var/run/custos
-        - name: hugepages
-          mountPath: /dev/hugepages
       volumes:
       - name: socket-dir
         hostPath:
           path: /var/run/custos
           type: DirectoryOrCreate
-      - name: hugepages
-        hostPath:
-          path: /dev/hugepages
-          type: Directory

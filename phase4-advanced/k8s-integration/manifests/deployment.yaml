@@ -42,11 +42,9 @@ spec:
           requests:
             cpu: "1"
             memory: "512Mi"
-            hugepages-2Mi: "512Mi" # If hugepages are used for UMEM
           limits:
             cpu: "1"
             memory: "512Mi"
-            hugepages-2Mi: "512Mi"
         securityContext:
           allowPrivilegeEscalation: false
           privileged: false
@@ -58,13 +56,8 @@ spec:
         - name: socket-dir
           mountPath: /var/run/custos
           readOnly: false # Needs write access to communicate over the UDS stream
-        - name: hugepages
-          mountPath: /dev/hugepages
       volumes:
       - name: socket-dir
         hostPath:
           path: /var/run/custos
           type: Directory
-      - name: hugepages
-        emptyDir:
-          medium: HugePages

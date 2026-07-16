@@ -42,6 +42,7 @@ pub struct Args {
 #[cfg(target_os = "linux")]
 mod linux {
     use super::*;
+    use custos_grpc_basic::ParseError;
     use custos_protobuf::{validate_grpc_protobuf_packet, ValidationConfig, ValidationError};
 
     /// Maps the AF_XDP rings from the socket file descriptor on Linux.
@@ -244,6 +245,7 @@ mod linux {
 
             if received > 0 {
                 rx_packets += received as u64;
+                let mut processed: u32 = 0;
 
                 for i in 0..received {
                     // SAFETY: rx_desc fetches descriptor pointer.
@@ -258,105 +260,108 @@ mod linux {
                         std::slice::from_raw_parts((umem_addr as usize + offset) as *const u8, len)
                     };
 
-                    // Validate packet using Phase 3 engine
-                    match validate_grpc_protobuf_packet(buf, &validation_config) {
-                        Ok((_shape, _shape_len)) => {
-                            // Forward or Echo packet
-                            if args.mode == "echo" {
-                                // Swap source and destination MACs in-place
-                                // SAFETY: We have exclusive access to the packet payload slice.
-                                let contents = unsafe {
-                                    std::slice::from_raw_parts_mut(
-                                        (umem_addr as usize + offset) as *mut u8,
-                                        len,
-                                    )
-                                };
-                                if contents.len() >= 12 {
-                                    let mut mac_dst = [0u8; 6];
-                                    let mut mac_src = [0u8; 6];
-                                    mac_dst.copy_from_slice(&contents[0..6]);
-                                    mac_src.copy_from_slice(&contents[6..12]);
-                                    contents[0..6].copy_from_slice(&mac_src);
-                                    contents[6..12].copy_from_slice(&mac_dst);
-                                }
-                            }
+                    let validation = validate_grpc_protobuf_packet(buf, &validation_config);
+                    let should_drop = !matches!(
+                        &validation,
+                        Ok(_)
+                            | Err(ValidationError::Parse(ParseError::WrongPort))
+                            | Err(ValidationError::Parse(ParseError::NonIPv4))
+                            | Err(ValidationError::Parse(ParseError::NonTCP))
+                    );
 
-                            // Submit packet to TX Ring
-                            let mut tx_idx: u32 = 0;
-                            // SAFETY: Reserve a slot in TX ring.
-                            let reserved = unsafe {
-                                libxdp_sys::xsk_ring_prod__reserve(&mut tx_ring, 1, &mut tx_idx)
+                    if let Err(e) = validation {
+                        trace!("Packet validation failed: {:?}.", e);
+                    }
+
+                    if should_drop {
+                        let mut fill_idx: u32 = 0;
+                        // SAFETY: Recycle frame back to Fill ring.
+                        let res_fill = unsafe {
+                            libxdp_sys::xsk_ring_prod__reserve(&mut fill_ring, 1, &mut fill_idx)
+                        };
+                        if res_fill == 0 {
+                            warn!("Fill ring is full while recycling dropped packet; retaining RX descriptor");
+                            break;
+                        }
+
+                        let fill_addr = unsafe {
+                            libxdp_sys::xsk_ring_prod__fill_addr(&mut fill_ring, fill_idx)
+                        };
+                        unsafe {
+                            *fill_addr = offset as u64;
+                        }
+                        unsafe {
+                            libxdp_sys::xsk_ring_prod__submit(&mut fill_ring, 1);
+                        }
+                        drop_packets += 1;
+                    } else {
+                        if args.mode == "echo" {
+                            // Swap source and destination MACs in-place
+                            // SAFETY: We have exclusive access to the packet payload slice.
+                            let contents = unsafe {
+                                std::slice::from_raw_parts_mut(
+                                    (umem_addr as usize + offset) as *mut u8,
+                                    len,
+                                )
                             };
-                            if reserved > 0 {
-                                // SAFETY: Retrieve TX descriptor reference.
-                                let tx_desc = unsafe {
-                                    libxdp_sys::xsk_ring_prod__tx_desc(&mut tx_ring, tx_idx)
-                                };
-                                unsafe {
-                                    (*tx_desc).addr = offset as u64;
-                                    (*tx_desc).len = len as u32;
-                                    (*tx_desc).options = 0;
-                                }
-                                // SAFETY: Submit slot to hardware ring.
-                                unsafe {
-                                    libxdp_sys::xsk_ring_prod__submit(&mut tx_ring, 1);
-                                }
-                                tx_packets += 1;
-                            } else {
-                                // Fallback to recycling directly if TX ring is full
-                                let mut fill_idx: u32 = 0;
-                                // SAFETY: Recycle frame back to Fill ring.
-                                let res_fill = unsafe {
-                                    libxdp_sys::xsk_ring_prod__reserve(
-                                        &mut fill_ring,
-                                        1,
-                                        &mut fill_idx,
-                                    )
-                                };
-                                if res_fill > 0 {
-                                    let fill_addr = unsafe {
-                                        libxdp_sys::xsk_ring_prod__fill_addr(
-                                            &mut fill_ring,
-                                            fill_idx,
-                                        )
-                                    };
-                                    unsafe {
-                                        *fill_addr = offset as u64;
-                                    }
-                                    unsafe {
-                                        libxdp_sys::xsk_ring_prod__submit(&mut fill_ring, 1);
-                                    }
-                                }
-                                drop_packets += 1;
+                            if contents.len() >= 12 {
+                                let mut mac_dst = [0u8; 6];
+                                let mut mac_src = [0u8; 6];
+                                mac_dst.copy_from_slice(&contents[0..6]);
+                                mac_src.copy_from_slice(&contents[6..12]);
+                                contents[0..6].copy_from_slice(&mac_src);
+                                contents[6..12].copy_from_slice(&mac_dst);
                             }
                         }
-                        Err(e) => {
-                            // Validation failed! Log drop reason (ignoring payloads for privacy) and recycle
-                            trace!("Packet validation failed: {:?}. Dropping packet.", e);
 
+                        let mut tx_idx: u32 = 0;
+                        // SAFETY: Reserve a slot in TX ring.
+                        let reserved = unsafe {
+                            libxdp_sys::xsk_ring_prod__reserve(&mut tx_ring, 1, &mut tx_idx)
+                        };
+                        if reserved == 0 {
                             let mut fill_idx: u32 = 0;
                             // SAFETY: Recycle frame back to Fill ring.
                             let res_fill = unsafe {
                                 libxdp_sys::xsk_ring_prod__reserve(&mut fill_ring, 1, &mut fill_idx)
                             };
-                            if res_fill > 0 {
-                                let fill_addr = unsafe {
-                                    libxdp_sys::xsk_ring_prod__fill_addr(&mut fill_ring, fill_idx)
-                                };
-                                unsafe {
-                                    *fill_addr = offset as u64;
-                                }
-                                unsafe {
-                                    libxdp_sys::xsk_ring_prod__submit(&mut fill_ring, 1);
-                                }
+                            if res_fill == 0 {
+                                warn!("TX and Fill rings are full; retaining RX descriptor");
+                                break;
+                            }
+
+                            let fill_addr = unsafe {
+                                libxdp_sys::xsk_ring_prod__fill_addr(&mut fill_ring, fill_idx)
+                            };
+                            unsafe {
+                                *fill_addr = offset as u64;
+                            }
+                            unsafe {
+                                libxdp_sys::xsk_ring_prod__submit(&mut fill_ring, 1);
                             }
                             drop_packets += 1;
+                        } else {
+                            // SAFETY: Retrieve TX descriptor reference.
+                            let tx_desc =
+                                unsafe { libxdp_sys::xsk_ring_prod__tx_desc(&mut tx_ring, tx_idx) };
+                            unsafe {
+                                (*tx_desc).addr = offset as u64;
+                                (*tx_desc).len = len as u32;
+                                (*tx_desc).options = 0;
+                            }
+                            // SAFETY: Submit slot to hardware ring.
+                            unsafe {
+                                libxdp_sys::xsk_ring_prod__submit(&mut tx_ring, 1);
+                            }
+                            tx_packets += 1;
                         }
                     }
+
+                    processed += 1;
                 }
                 // SAFETY: Release consumed slots.
                 unsafe {
-                    libxdp_sys::xsk_ring_cons__release(&mut rx_ring, received);
+                    libxdp_sys::xsk_ring_cons__release(&mut rx_ring, processed);
                 }
             }
 

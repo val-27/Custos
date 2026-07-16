@@ -139,7 +139,10 @@ fn verify_peer_credentials(stream: &std::os::unix::net::UnixStream) -> io::Resul
             format!("Unauthorized peer connection from UID {}", ucred.uid),
         ));
     }
-    info!("Verified worker credentials: PID={}, UID={}, GID={}", ucred.pid, ucred.uid, ucred.gid);
+    info!(
+        "Verified worker credentials: PID={}, UID={}, GID={}",
+        ucred.pid, ucred.uid, ucred.gid
+    );
     Ok(())
 }
 
@@ -155,7 +158,14 @@ mod linux {
         args: &Args,
         umem_addr: *mut libc::c_void,
         umem_size: usize,
-    ) -> Result<(RawFd, *mut libxdp_sys::xsk_umem, *mut libxdp_sys::xsk_socket), Box<dyn Error>> {
+    ) -> Result<
+        (
+            RawFd,
+            *mut libxdp_sys::xsk_umem,
+            *mut libxdp_sys::xsk_socket,
+        ),
+        Box<dyn Error>,
+    > {
         let mut umem_ptr: *mut libxdp_sys::xsk_umem = std::ptr::null_mut();
         let mut fq = Box::new(std::mem::zeroed::<libxdp_sys::xsk_ring_prod>());
         let mut cq = Box::new(std::mem::zeroed::<libxdp_sys::xsk_ring_cons>());
@@ -181,7 +191,11 @@ mod linux {
             )
         };
         if err != 0 {
-            return Err(format!("xsk_umem__create failed: {}", io::Error::from_raw_os_error(-err)).into());
+            return Err(format!(
+                "xsk_umem__create failed: {}",
+                io::Error::from_raw_os_error(-err)
+            )
+            .into());
         }
         info!("UMEM registered with the kernel successfully using libxdp");
 
@@ -218,8 +232,14 @@ mod linux {
         };
         if err != 0 {
             // SAFETY: Clean up UMEM if socket creation fails.
-            unsafe { libxdp_sys::xsk_umem__delete(umem_ptr); }
-            return Err(format!("xsk_socket__create failed: {}", io::Error::from_raw_os_error(-err)).into());
+            unsafe {
+                libxdp_sys::xsk_umem__delete(umem_ptr);
+            }
+            return Err(format!(
+                "xsk_socket__create failed: {}",
+                io::Error::from_raw_os_error(-err)
+            )
+            .into());
         }
 
         // 4. Get socket FD
@@ -234,7 +254,9 @@ mod linux {
             return Err(format!("xsk_socket__fd returned invalid fd: {}", socket_fd).into());
         }
 
-        info!("AF_XDP socket created, bound, and default eBPF redirect program attached successfully");
+        info!(
+            "AF_XDP socket created, bound, and default eBPF redirect program attached successfully"
+        );
         Ok((socket_fd, umem_ptr, socket_ptr))
     }
 }
@@ -313,6 +335,15 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 
     let listener = UnixListener::bind(socket_path)?;
+    #[cfg(target_os = "linux")]
+    {
+        let socket_path_cstr = std::ffi::CString::new(args.socket_path.as_str())?;
+        // SAFETY: chown is called on the just-created Unix socket path with a valid C string.
+        let res = unsafe { libc::chown(socket_path_cstr.as_ptr(), !0 as libc::uid_t, 10001) };
+        if res < 0 {
+            return Err(io::Error::last_os_error().into());
+        }
+    }
     // Set 0o660 permissions so only owner and group can write/read the socket
     fs::set_permissions(socket_path, fs::Permissions::from_mode(0o660))?;
     info!(
@@ -343,7 +374,10 @@ fn main() -> Result<(), Box<dyn Error>> {
                 #[cfg(target_os = "linux")]
                 {
                     if let Err(e) = verify_peer_credentials(&stream) {
-                        error!("Peer credentials validation failed: {}. Rejecting client.", e);
+                        error!(
+                            "Peer credentials validation failed: {}. Rejecting client.",
+                            e
+                        );
                         continue;
                     }
                 }
