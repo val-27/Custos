@@ -1,7 +1,7 @@
 //! Phase 2 Library: zero-copy parser and PRNG implementation.
 
-use zerocopy::{AsBytes, FromBytes, FromZeroes, Unaligned};
 use zerocopy::byteorder::network_endian::{U16, U32};
+use zerocopy::{AsBytes, FromBytes, FromZeroes, Unaligned};
 
 /// Ethernet Header (14 bytes)
 #[derive(FromZeroes, FromBytes, AsBytes, Unaligned, Clone, Copy, Debug)]
@@ -49,7 +49,7 @@ pub struct Http2Hdr {
     pub length: [u8; 3], // 24-bit big-endian payload length
     pub frame_type: u8,  // DATA is 0x0
     pub flags: u8,
-    pub stream_id: U32,  // 31-bit stream ID
+    pub stream_id: U32, // 31-bit stream ID
 }
 
 /// gRPC Frame Header (5 bytes)
@@ -175,7 +175,8 @@ pub fn parse_grpc_packet(buf: &[u8], target_port: u16) -> Result<ParsedGrpc<'_>,
     if buf.len() < tcp_offset + 20 {
         return Err(ParseError::BufferTooSmall);
     }
-    let tcp = TcpHdr::ref_from(&buf[tcp_offset..tcp_offset + 20]).ok_or(ParseError::BufferTooSmall)?;
+    let tcp =
+        TcpHdr::ref_from(&buf[tcp_offset..tcp_offset + 20]).ok_or(ParseError::BufferTooSmall)?;
 
     // Validate port match
     if tcp.dst_port.get() != target_port {
@@ -193,7 +194,8 @@ pub fn parse_grpc_packet(buf: &[u8], target_port: u16) -> Result<ParsedGrpc<'_>,
     if buf.len() < payload_offset + 9 {
         return Err(ParseError::BufferTooSmall);
     }
-    let http2 = Http2Hdr::ref_from(&buf[payload_offset..payload_offset + 9]).ok_or(ParseError::BadHttp2Hdr)?;
+    let http2 = Http2Hdr::ref_from(&buf[payload_offset..payload_offset + 9])
+        .ok_or(ParseError::BadHttp2Hdr)?;
 
     // Check frame type (DATA frame is 0x0)
     if http2.frame_type != 0x0 {
@@ -215,7 +217,8 @@ pub fn parse_grpc_packet(buf: &[u8], target_port: u16) -> Result<ParsedGrpc<'_>,
     if http2_payload_len < 5 {
         return Err(ParseError::BadGrpcHdr);
     }
-    let grpc = GrpcHdr::ref_from(&buf[grpc_offset..grpc_offset + 5]).ok_or(ParseError::BadGrpcHdr)?;
+    let grpc =
+        GrpcHdr::ref_from(&buf[grpc_offset..grpc_offset + 5]).ok_or(ParseError::BadGrpcHdr)?;
 
     // Check bounds: gRPC message length must fit inside HTTP/2 DATA payload
     let grpc_message_len = grpc.message_len.get() as usize;

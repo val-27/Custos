@@ -5,8 +5,8 @@
 //! tracks detailed packet types and validation failures, and supports simulated drop rates.
 
 use clap::Parser;
+use custos_common::OperationMode;
 use custos_grpc_basic::{parse_grpc_packet, ParseError, Xorshift};
-use std::convert::TryInto;
 use std::error::Error;
 use std::num::NonZeroU32;
 use std::time::Instant;
@@ -38,9 +38,9 @@ struct Args {
     #[arg(short, long, default_value_t = 2048)]
     frame_count: u32,
 
-    /// Operation mode: "forward" (validate & forward) or "echo" (validate & swap MACs)
-    #[arg(short, long, default_value = "forward")]
-    mode: String,
+    /// Packet processing mode: forward or echo
+    #[arg(short, long, default_value_t = OperationMode::Forward)]
+    mode: OperationMode,
 
     /// Target gRPC port to validate packets for
     #[arg(short, long, default_value_t = 50051)]
@@ -72,9 +72,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     } else {
         Level::INFO
     };
-    let subscriber = FmtSubscriber::builder()
-        .with_max_level(log_level)
-        .finish();
+    let subscriber = FmtSubscriber::builder().with_max_level(log_level).finish();
     tracing::subscriber::set_global_default(subscriber)?;
 
     info!("Starting custos-phase2-grpc-basic...");
@@ -92,16 +90,29 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     // 2. Interface Resolution
     let if_name: Interface = args.interface.parse().map_err(|e| {
-        error!("Failed to parse interface name '{}': {:?}", args.interface, e);
+        error!(
+            "Failed to parse interface name '{}': {:?}",
+            args.interface, e
+        );
         e
     })?;
 
-    // 3. UMEM Configuration (2KB frames, standard ring sizes)
+    // 3. UMEM Configuration (2 KiB frames, ring sizes from shared constants)
+    //
+    // The NonZeroU32 conversions use expect() rather than unwrap() so that a
+    // misconfigured constant produces a descriptive panic message during startup
+    // (not in the hot path). UMEM_FRAME_SIZE and UMEM_RING_SIZE are guaranteed
+    // non-zero by their definitions in custos-common.
+    let frame_size_nz = std::num::NonZeroU32::new(custos_common::UMEM_FRAME_SIZE)
+        .expect("UMEM_FRAME_SIZE must be non-zero");
+    let ring_size_nz = std::num::NonZeroU32::new(custos_common::UMEM_RING_SIZE)
+        .expect("UMEM_RING_SIZE must be non-zero");
+
     let umem_config = UmemConfigBuilder::new()
-        .frame_size(2048.try_into().unwrap())
-        .frame_headroom(0.try_into().unwrap())
-        .fill_queue_size(2048.try_into().unwrap())
-        .comp_queue_size(2048.try_into().unwrap())
+        .frame_size(frame_size_nz)
+        .frame_headroom(0)
+        .fill_queue_size(ring_size_nz)
+        .comp_queue_size(ring_size_nz)
         .build()
         .map_err(|e| {
             error!("Failed to build UmemConfig: {:?}", e);
@@ -112,16 +123,15 @@ fn main() -> Result<(), Box<dyn Error>> {
     let frame_count_nonzero = NonZeroU32::new(args.frame_count)
         .ok_or("Frame count must be non-zero and a power of two")?;
 
-    let (umem, frame_descs) = Umem::new(
-        umem_config,
-        frame_count_nonzero,
-        use_huge_pages,
-    )
-    .map_err(|e| {
-        error!("Failed to initialize UMEM: {:?}", e);
-        e
-    })?;
-    info!("Initialized UMEM with {} frames (2KB size)", args.frame_count);
+    let (umem, frame_descs) =
+        Umem::new(umem_config, frame_count_nonzero, use_huge_pages).map_err(|e| {
+            error!("Failed to initialize UMEM: {:?}", e);
+            e
+        })?;
+    info!(
+        "Initialized UMEM with {} frames (2KB size)",
+        args.frame_count
+    );
 
     // 4. Socket Configuration
     let mut socket_config_builder = SocketConfig::builder();
@@ -135,20 +145,17 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     let socket_config = socket_config_builder.bind_flags(bind_flags).build();
 
-    let (tx_q, rx_q, fq_and_cq) = unsafe {
-        Socket::new(
-            socket_config,
-            &umem,
-            &if_name,
-            args.queue_id,
-        )
-    }
-    .map_err(|e| {
-        error!("Failed to initialize AF_XDP socket: {:?}", e);
-        e
-    })?;
-    let (mut fq, cq) = fq_and_cq.ok_or("Expected Fill and Completion queues from socket creation")?;
-    info!("Bound AF_XDP socket to interface: {}, queue: {}", args.interface, args.queue_id);
+    let (tx_q, rx_q, fq_and_cq) =
+        unsafe { Socket::new(socket_config, &umem, &if_name, args.queue_id) }.map_err(|e| {
+            error!("Failed to initialize AF_XDP socket: {:?}", e);
+            e
+        })?;
+    let (mut fq, cq) =
+        fq_and_cq.ok_or("Expected Fill and Completion queues from socket creation")?;
+    info!(
+        "Bound AF_XDP socket to interface: {}, queue: {}",
+        args.interface, args.queue_id
+    );
 
     // 5. Populate Fill Queue with all available UMEM frames
     let produced = unsafe { fq.produce(&frame_descs) };
@@ -169,6 +176,15 @@ fn main() -> Result<(), Box<dyn Error>> {
 }
 
 /// The core packet processing loop. Runs with zero heap allocations in the hot path.
+///
+/// # Purpose
+/// Polls the AF_XDP Rx ring in batches, validates each packet with
+/// `parse_grpc_packet`, dispatches according to `mode` (Forward / Echo),
+/// and recycles invalid or simulated-drop frames immediately.
+///
+/// # Performance Rationale
+/// `mode` is stored as an `OperationMode` enum so the per-packet branch is an
+/// integer comparison rather than a heap-allocated string scan.
 fn run_packet_loop(
     args: Args,
     umem: Umem,
@@ -227,7 +243,10 @@ fn run_packet_loop(
     let mut drop_validation_failed: u64 = 0;
     let mut drop_simulated: u64 = 0;
 
-    info!("Entering hot-path validation poll loop (target_port: {})...", args.target_port);
+    info!(
+        "Entering hot-path validation poll loop (target_port: {})...",
+        args.target_port
+    );
 
     loop {
         // A. Consume received packets from Rx Ring
@@ -290,7 +309,7 @@ fn run_packet_loop(
                             }
                         } else {
                             // Forward packet (or Swap MAC if mode is echo)
-                            if args.mode == "echo" {
+                            if args.mode == OperationMode::Echo {
                                 let mut data_mut = unsafe { umem.data_mut(desc) };
                                 let contents = data_mut.contents_mut();
                                 if contents.len() >= 12 {
