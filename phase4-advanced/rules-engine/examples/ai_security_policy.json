@@ -1,0 +1,31 @@
+{
+  "version": "1.0.0",
+  "description": "JSON representation of the AI Inference Security Gateway Policy",
+  "allowed_ports": [50051, 8001],
+  "blocked_ips": ["192.168.10.25", "10.0.99.1"],
+  "protobuf_rules": {
+    "max_varint_bytes": 9,
+    "max_recursion_depth": 4,
+    "field_allow_list": [1, 2, 3, 4],
+    "shape_rules": [
+      {
+        "field_number": 3,
+        "min_dimensions": 2,
+        "max_dimensions": 4,
+        "max_tensor_elements": 1048576,
+        "dimension_bounds": [
+          {
+            "index": 0,
+            "min": 1,
+            "max": 8
+          },
+          {
+            "index": 1,
+            "min": 3,
+            "max": 3
+          }
+        ]
+      }
+    ]
+  }
+}
