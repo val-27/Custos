@@ -1,0 +1,10 @@
+[package]
+name = "custos-common"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+libc = { workspace = true }
+zerocopy = { workspace = true }
+bytemuck = { workspace = true }
+tracing = { workspace = true }
