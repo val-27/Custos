@@ -3,9 +3,11 @@
 
 use arc_swap::ArcSwap;
 use custos_protobuf::ValidationConfig;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::fs::OpenOptions;
 use std::io::Write;
+use std::os::unix::fs::OpenOptionsExt;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 /// Thread-local metrics structure, aligned to cache lines (64 bytes) to prevent false sharing.
 #[derive(Debug)]
@@ -122,7 +124,7 @@ pub fn get_numa_cores(interface: &str) -> Option<Vec<usize>> {
 
     let cpulist_path = format!("/sys/devices/system/node/node{}/cpulist", numa_node);
     let cpulist_str = std::fs::read_to_string(&cpulist_path).ok()?;
-    
+
     let mut cores = Vec::new();
     for part in cpulist_str.trim().split(',') {
         if part.is_empty() {
@@ -140,7 +142,7 @@ pub fn get_numa_cores(interface: &str) -> Option<Vec<usize>> {
             cores.push(core);
         }
     }
-    
+
     if cores.is_empty() {
         None
     } else {
@@ -158,7 +160,11 @@ pub fn get_numa_cores(interface: &str) -> Option<Vec<usize>> {
 ///
 /// Periodically monitors the target file for modification time changes and atomic-swaps
 /// the live config when an update is detected.
-pub fn spawn_config_watcher(path: String, shared_config: Arc<SharedConfig>) {
+pub fn spawn_config_watcher(
+    path: String,
+    shared_config: Arc<SharedConfig>,
+    target_port_override: Option<u16>,
+) {
     std::thread::spawn(move || {
         let mut last_modified = std::fs::metadata(&path)
             .and_then(|m| m.modified())
@@ -171,12 +177,22 @@ pub fn spawn_config_watcher(path: String, shared_config: Arc<SharedConfig>) {
                     if modified > last_modified {
                         last_modified = modified;
                         match load_config_file(&path) {
-                            Ok(new_config) => {
+                            Ok(mut new_config) => {
+                                if let Some(port) = target_port_override {
+                                    new_config.target_port = port;
+                                }
                                 shared_config.validation.store(Arc::new(new_config));
-                                tracing::info!("Configuration dynamically reloaded from TOML: {}", path);
+                                tracing::info!(
+                                    "Configuration dynamically reloaded from TOML: {}",
+                                    path
+                                );
                             }
                             Err(e) => {
-                                tracing::error!("Failed to dynamically reload TOML config from {}: {:?}", path, e);
+                                tracing::error!(
+                                    "Failed to dynamically reload TOML config from {}: {:?}",
+                                    path,
+                                    e
+                                );
                             }
                         }
                     }
@@ -198,13 +214,13 @@ pub fn aggregate_and_report_stats(
     let mut tx_bytes = 0;
     let mut recycled_packets = 0;
     let mut drop_validation_failed = 0;
-    
+
     let mut stat_ipv4 = 0;
     let mut stat_tcp = 0;
     let mut stat_http2_data = 0;
     let mut stat_grpc = 0;
     let mut stat_protobuf = 0;
-    
+
     let mut err_too_small = 0;
     let mut err_non_ipv4 = 0;
     let mut err_bad_ip_len = 0;
@@ -238,13 +254,13 @@ pub fn aggregate_and_report_stats(
         tx_bytes += s.tx_bytes.load(Ordering::Relaxed);
         recycled_packets += s.recycled_packets.load(Ordering::Relaxed);
         drop_validation_failed += s.drop_validation_failed.load(Ordering::Relaxed);
-        
+
         stat_ipv4 += s.stat_ipv4.load(Ordering::Relaxed);
         stat_tcp += s.stat_tcp.load(Ordering::Relaxed);
         stat_http2_data += s.stat_http2_data.load(Ordering::Relaxed);
         stat_grpc += s.stat_grpc.load(Ordering::Relaxed);
         stat_protobuf += s.stat_protobuf.load(Ordering::Relaxed);
-        
+
         err_too_small += s.err_too_small.load(Ordering::Relaxed);
         err_non_ipv4 += s.err_non_ipv4.load(Ordering::Relaxed);
         err_bad_ip_len += s.err_bad_ip_len.load(Ordering::Relaxed);
@@ -285,7 +301,11 @@ pub fn aggregate_and_report_stats(
     if verbose {
         tracing::debug!(
             "Protocols: IPv4: {} | TCP: {} | HTTP/2: {} | gRPC: {} | Protobuf: {}",
-            stat_ipv4, stat_tcp, stat_http2_data, stat_grpc, stat_protobuf
+            stat_ipv4,
+            stat_tcp,
+            stat_http2_data,
+            stat_grpc,
+            stat_protobuf
         );
         tracing::debug!(
             "L2-L5 Parser Failures: TooSmall: {} | NonIPv4: {} | BadIpLen: {} | NonTCP: {} | BadIpCsum: {} | BadTcpLen: {} | WrongPort: {} | BadHttp2: {} | NonHttp2Data: {} | BadGrpc: {} | L4Overflow: {}",
@@ -297,7 +317,6 @@ pub fn aggregate_and_report_stats(
         );
     }
 
-    // Write to /tmp/custos_metrics.json
     let json_metrics = format!(
         r#"{{
   "rx_packets": {},
@@ -343,14 +362,50 @@ pub fn aggregate_and_report_stats(
     "1025_2048": {}
   }}
 }}"#,
-        rx_packets, tx_packets, recycled_packets, drop_validation_failed, rx_bytes, tx_bytes,
-        stat_ipv4, stat_tcp, stat_http2_data, stat_grpc, stat_protobuf,
-        err_too_small, err_non_ipv4, err_bad_ip_len, err_non_tcp, err_bad_ip_csum, err_bad_tcp_len, err_wrong_port, err_bad_http2, err_non_http2_data, err_bad_grpc, err_l4_overflow,
-        anomaly_invalid_varint, anomaly_invalid_wire_type, anomaly_recursion_limit, anomaly_buffer_underflow, anomaly_shape_dim_limit, anomaly_shape_val_invalid, anomaly_tensor_size_limit, anomaly_invalid_varint_bytes,
-        hist_payload_0_64, hist_payload_65_256, hist_payload_257_1024, hist_payload_1025_2048
+        rx_packets,
+        tx_packets,
+        recycled_packets,
+        drop_validation_failed,
+        rx_bytes,
+        tx_bytes,
+        stat_ipv4,
+        stat_tcp,
+        stat_http2_data,
+        stat_grpc,
+        stat_protobuf,
+        err_too_small,
+        err_non_ipv4,
+        err_bad_ip_len,
+        err_non_tcp,
+        err_bad_ip_csum,
+        err_bad_tcp_len,
+        err_wrong_port,
+        err_bad_http2,
+        err_non_http2_data,
+        err_bad_grpc,
+        err_l4_overflow,
+        anomaly_invalid_varint,
+        anomaly_invalid_wire_type,
+        anomaly_recursion_limit,
+        anomaly_buffer_underflow,
+        anomaly_shape_dim_limit,
+        anomaly_shape_val_invalid,
+        anomaly_tensor_size_limit,
+        anomaly_invalid_varint_bytes,
+        hist_payload_0_64,
+        hist_payload_65_256,
+        hist_payload_257_1024,
+        hist_payload_1025_2048
     );
 
-    if let Ok(mut file) = std::fs::File::create("/tmp/custos_metrics.json") {
+    if let Ok(mut file) = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open("/tmp/custos_metrics.json")
+    {
         let _ = file.write_all(json_metrics.as_bytes());
     }
 }

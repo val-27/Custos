@@ -9,13 +9,15 @@ use custos_grpc_basic::ParseError;
 use custos_multi_queue_sharding::{
     get_numa_cores, load_config_file, spawn_config_watcher, SharedConfig, ThreadStats,
 };
-use custos_protobuf::{validate_grpc_protobuf_packet, ProtoError, ValidationError, ValidationConfig};
+use custos_protobuf::{
+    validate_grpc_protobuf_packet, ProtoError, ValidationConfig, ValidationError,
+};
 use nix::sys::signal::{sigaction, SaFlags, SigAction, SigHandler, SigSet, Signal};
 use std::convert::TryInto;
 use std::error::Error;
 use std::num::NonZeroU32;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Instant;
 use tracing::{error, info, Level};
 use tracing_subscriber::FmtSubscriber;
@@ -66,7 +68,7 @@ struct Args {
     frame_count: u32,
 
     /// Operation mode: "forward" (validate & forward) or "echo" (validate & swap MACs)
-    #[arg(short, long, default_value = "forward")]
+    #[arg(short, long, default_value = "forward", value_parser = ["forward", "echo"])]
     mode: String,
 
     /// Config file path (TOML) for validation rules
@@ -99,9 +101,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     } else {
         Level::INFO
     };
-    let subscriber = FmtSubscriber::builder()
-        .with_max_level(log_level)
-        .finish();
+    let subscriber = FmtSubscriber::builder().with_max_level(log_level).finish();
     tracing::subscriber::set_global_default(subscriber)?;
 
     info!("Starting custos-multi-queue-sharding daemon...");
@@ -109,6 +109,9 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     if args.force_copy && args.force_zerocopy {
         return Err("Cannot specify both --force-copy and --force-zerocopy".into());
+    }
+    if args.frame_count == 0 || !args.frame_count.is_power_of_two() {
+        return Err("--frame-count must be a non-zero power of two".into());
     }
 
     // 2. Setup Unix signal handlers for clean shut-down
@@ -132,14 +135,18 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     // Spawn config file watcher thread if TOML file was supplied
     if let Some(config_path) = &args.config {
-        spawn_config_watcher(config_path.clone(), shared_config.clone());
+        spawn_config_watcher(config_path.clone(), shared_config.clone(), args.target_port);
     }
 
     // 4. Resolve CPU core pinning layout
     // Fetch number of online cores on system via sysconf
     // SAFETY: Calling libc::sysconf to get number of online processors.
     let online_cpus = unsafe { libc::sysconf(libc::_SC_NPROCESSORS_ONLN) };
-    let online_cpus = if online_cpus < 0 { 8 } else { online_cpus as usize };
+    let online_cpus = if online_cpus < 0 {
+        8
+    } else {
+        online_cpus as usize
+    };
     info!("Detected {} online CPU core(s)", online_cpus);
 
     let num_queues = args.queues.unwrap_or_else(|| {
@@ -150,7 +157,13 @@ fn main() -> Result<(), Box<dyn Error>> {
             q
         }
     });
-    info!("Steering configurations: allocating {} queues / worker threads", num_queues);
+    if num_queues == 0 {
+        return Err("--queues must be greater than zero".into());
+    }
+    info!(
+        "Steering configurations: allocating {} queues / worker threads",
+        num_queues
+    );
 
     // Resolve pin layout
     let pin_layout = if let Some(cores_str) = &args.cores {
@@ -191,7 +204,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         let verbose = args.verbose;
 
         let handle = std::thread::spawn(move || {
-            if let Err(e) = run_worker(
+            run_worker(
                 queue_idx as u32,
                 core_id,
                 interface,
@@ -202,9 +215,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                 force_copy,
                 force_zerocopy,
                 verbose,
-            ) {
-                error!("Worker thread on queue {} crashed: {:?}", queue_idx, e);
-            }
+            )
+            .map_err(|e| format!("Worker thread on queue {} crashed: {:?}", queue_idx, e))
         });
 
         worker_handles.push(handle);
@@ -212,9 +224,22 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     // 6. Main thread loops executing periodic stats aggregation and JSON metrics export
     let mut last_stats_time = Instant::now();
+    let mut worker_error = None;
 
     while !SHUTDOWN.load(Ordering::Relaxed) {
         std::thread::sleep(std::time::Duration::from_secs(1));
+        if let Some((idx, _)) = worker_handles
+            .iter()
+            .enumerate()
+            .find(|(_, handle)| handle.is_finished())
+        {
+            worker_error = Some(format!(
+                "Worker thread for queue {} exited unexpectedly",
+                idx
+            ));
+            SHUTDOWN.store(true, Ordering::Relaxed);
+            break;
+        }
         let elapsed = last_stats_time.elapsed();
         custos_multi_queue_sharding::aggregate_and_report_stats(&stats_list, elapsed, args.verbose);
         last_stats_time = Instant::now();
@@ -222,8 +247,24 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     info!("Shutdown signal received. Waiting for worker threads to exit...");
     for (idx, handle) in worker_handles.into_iter().enumerate() {
-        let _ = handle.join();
-        info!("Worker thread for queue {} joined successfully", idx);
+        match handle.join() {
+            Ok(Ok(())) => info!("Worker thread for queue {} joined successfully", idx),
+            Ok(Err(e)) => {
+                error!("{}", e);
+                worker_error = Some(e);
+            }
+            Err(_) => {
+                let e = format!("Worker thread for queue {} panicked", idx);
+                error!("{}", e);
+                if worker_error.is_none() {
+                    worker_error = Some(e);
+                }
+            }
+        }
+    }
+
+    if let Some(e) = worker_error {
+        return Err(e.into());
     }
 
     info!("Custos multi-queue sharding daemon terminated gracefully.");
@@ -248,13 +289,15 @@ fn run_worker(
 
     // B. Resolve interface
     let if_name: Interface = interface.parse()?;
+    let frame_count_nonzero =
+        NonZeroU32::new(frame_count).ok_or("Frame count must be non-zero and a power of two")?;
 
     // C. Initialize dedicated UMEM slice (allocated independently per queue)
     let umem_config = UmemConfigBuilder::new()
         .frame_size(2048.try_into().unwrap())
         .frame_headroom(0.try_into().unwrap())
-        .fill_queue_size(2048.try_into().unwrap())
-        .comp_queue_size(2048.try_into().unwrap())
+        .fill_queue_size(frame_count_nonzero)
+        .comp_queue_size(frame_count_nonzero)
         .build()
         .map_err(|e| {
             error!("[Queue {}] Failed to build UmemConfig: {:?}", queue_id, e);
@@ -262,14 +305,15 @@ fn run_worker(
         })?;
 
     let use_huge_pages = false;
-    let frame_count_nonzero = NonZeroU32::new(frame_count)
-        .ok_or("Frame count must be non-zero and a power of two")?;
-
-    let (umem, frame_descs) = Umem::new(umem_config, frame_count_nonzero, use_huge_pages).map_err(|e| {
-        error!("[Queue {}] Failed to initialize UMEM: {:?}", queue_id, e);
-        e
-    })?;
-    info!("[Queue {}] Initialized dedicated UMEM with {} frames", queue_id, frame_count);
+    let (umem, frame_descs) =
+        Umem::new(umem_config, frame_count_nonzero, use_huge_pages).map_err(|e| {
+            error!("[Queue {}] Failed to initialize UMEM: {:?}", queue_id, e);
+            e
+        })?;
+    info!(
+        "[Queue {}] Initialized dedicated UMEM with {} frames",
+        queue_id, frame_count
+    );
 
     // D. Configure AF_XDP socket
     let mut socket_config_builder = SocketConfig::builder();
@@ -287,21 +331,27 @@ fn run_worker(
     if queue_id > 0 {
         use xsk_rs::config::LibxdpFlags;
         socket_config_builder.libxdp_flags(LibxdpFlags::XSK_LIBXDP_FLAGS_INHIBIT_PROG_LOAD);
-        info!("[Queue {}] Inhibiting XDP program load to prevent double-attachment conflicts", queue_id);
+        info!(
+            "[Queue {}] Inhibiting XDP program load to prevent double-attachment conflicts",
+            queue_id
+        );
     }
     let socket_config = socket_config_builder.build();
 
     // SAFETY: Creating a dedicated AF_XDP Socket bound to the interface and queue ID.
     // The UMEM reference is held for the lifetime of this socket.
-    let (tx_q, rx_q, fq_and_cq) = unsafe {
-        Socket::new(socket_config, &umem, &if_name, queue_id)
-    }.map_err(|e| {
-        error!("[Queue {}] Failed to bind AF_XDP socket: {:?}", queue_id, e);
-        e
-    })?;
+    let (tx_q, rx_q, fq_and_cq) = unsafe { Socket::new(socket_config, &umem, &if_name, queue_id) }
+        .map_err(|e| {
+            error!("[Queue {}] Failed to bind AF_XDP socket: {:?}", queue_id, e);
+            e
+        })?;
 
-    let (mut fq, cq) = fq_and_cq.ok_or("Expected Fill and Completion queues from socket creation")?;
-    info!("[Queue {}] Bound AF_XDP socket to interface: {}, queue: {}", queue_id, interface, queue_id);
+    let (mut fq, cq) =
+        fq_and_cq.ok_or("Expected Fill and Completion queues from socket creation")?;
+    info!(
+        "[Queue {}] Bound AF_XDP socket to interface: {}, queue: {}",
+        queue_id, interface, queue_id
+    );
 
     // E. Populate Fill Queue with all pre-allocated descriptors
     // SAFETY: Populating the Fill Queue with all owned frame descriptors before polling.
@@ -309,11 +359,16 @@ fn run_worker(
     if produced != frame_descs.len() {
         return Err(format!(
             "[Queue {}] Failed to populate Fill Queue: produced {} out of {} frames",
-            queue_id, produced, frame_descs.len()
+            queue_id,
+            produced,
+            frame_descs.len()
         )
         .into());
     }
-    info!("[Queue {}] Populated Fill Queue with all {} frames", queue_id, produced);
+    info!(
+        "[Queue {}] Populated Fill Queue with all {} frames",
+        queue_id, produced
+    );
 
     // F. Start Hot Polling Loop
     run_packet_loop(
@@ -365,7 +420,10 @@ fn run_packet_loop(
     let mut frames_in_tx = 0i64;
     let mut frames_in_comp = 0i64;
 
-    info!("[Queue {}] Entering hot-path packet polling loop...", queue_id);
+    info!(
+        "[Queue {}] Entering hot-path packet polling loop...",
+        queue_id
+    );
 
     while !SHUTDOWN.load(Ordering::Relaxed) {
         // A. Consume received packets from Rx Ring
@@ -373,7 +431,9 @@ fn run_packet_loop(
         let received = unsafe { rx_q.consume(&mut rx_descs[..]) };
 
         if received > 0 {
-            thread_stats.rx_packets.fetch_add(received as u64, Ordering::Relaxed);
+            thread_stats
+                .rx_packets
+                .fetch_add(received as u64, Ordering::Relaxed);
             frames_in_rx += received as i64;
             frames_in_fill -= received as i64;
 
@@ -384,17 +444,27 @@ fn run_packet_loop(
             for i in 0..received {
                 let desc = &mut rx_descs[i];
                 let len = desc.lengths().data();
-                thread_stats.rx_bytes.fetch_add(len as u64, Ordering::Relaxed);
+                thread_stats
+                    .rx_bytes
+                    .fetch_add(len as u64, Ordering::Relaxed);
 
                 // Increment payload size histogram
                 if len <= 64 {
-                    thread_stats.hist_payload_0_64.fetch_add(1, Ordering::Relaxed);
+                    thread_stats
+                        .hist_payload_0_64
+                        .fetch_add(1, Ordering::Relaxed);
                 } else if len <= 256 {
-                    thread_stats.hist_payload_65_256.fetch_add(1, Ordering::Relaxed);
+                    thread_stats
+                        .hist_payload_65_256
+                        .fetch_add(1, Ordering::Relaxed);
                 } else if len <= 1024 {
-                    thread_stats.hist_payload_257_1024.fetch_add(1, Ordering::Relaxed);
+                    thread_stats
+                        .hist_payload_257_1024
+                        .fetch_add(1, Ordering::Relaxed);
                 } else {
-                    thread_stats.hist_payload_1025_2048.fetch_add(1, Ordering::Relaxed);
+                    thread_stats
+                        .hist_payload_1025_2048
+                        .fetch_add(1, Ordering::Relaxed);
                 }
 
                 // SAFETY: Accessing packet memory within bounds of the allocated UMEM frame descriptor.
@@ -438,62 +508,64 @@ fn run_packet_loop(
                         tx_index += 1;
                     }
                     Err(validation_err) => {
-                        thread_stats.drop_validation_failed.fetch_add(1, Ordering::Relaxed);
+                        thread_stats
+                            .drop_validation_failed
+                            .fetch_add(1, Ordering::Relaxed);
 
                         match validation_err {
-                            ValidationError::Parse(parse_err) => {
-                                match parse_err {
-                                    ParseError::BufferTooSmall => {
-                                        thread_stats.err_too_small.fetch_add(1, Ordering::Relaxed);
-                                    }
-                                    ParseError::NonIPv4 => {
-                                        thread_stats.err_non_ipv4.fetch_add(1, Ordering::Relaxed);
-                                    }
-                                    ParseError::BadIpHdrLen => {
-                                        thread_stats.err_bad_ip_len.fetch_add(1, Ordering::Relaxed);
-                                    }
-                                    ParseError::NonTCP => {
-                                        thread_stats.stat_ipv4.fetch_add(1, Ordering::Relaxed);
-                                        thread_stats.err_non_tcp.fetch_add(1, Ordering::Relaxed);
-                                    }
-                                    ParseError::BadIpChecksum => {
-                                        thread_stats.stat_ipv4.fetch_add(1, Ordering::Relaxed);
-                                        thread_stats.err_bad_ip_csum.fetch_add(1, Ordering::Relaxed);
-                                    }
-                                    ParseError::BadTcpHdrLen => {
-                                        thread_stats.stat_ipv4.fetch_add(1, Ordering::Relaxed);
-                                        thread_stats.stat_tcp.fetch_add(1, Ordering::Relaxed);
-                                        thread_stats.err_bad_tcp_len.fetch_add(1, Ordering::Relaxed);
-                                    }
-                                    ParseError::WrongPort => {
-                                        thread_stats.stat_ipv4.fetch_add(1, Ordering::Relaxed);
-                                        thread_stats.stat_tcp.fetch_add(1, Ordering::Relaxed);
-                                        thread_stats.err_wrong_port.fetch_add(1, Ordering::Relaxed);
-                                    }
-                                    ParseError::BadHttp2Hdr => {
-                                        thread_stats.stat_ipv4.fetch_add(1, Ordering::Relaxed);
-                                        thread_stats.stat_tcp.fetch_add(1, Ordering::Relaxed);
-                                        thread_stats.err_bad_http2.fetch_add(1, Ordering::Relaxed);
-                                    }
-                                    ParseError::NonHttp2Data => {
-                                        thread_stats.stat_ipv4.fetch_add(1, Ordering::Relaxed);
-                                        thread_stats.stat_tcp.fetch_add(1, Ordering::Relaxed);
-                                        thread_stats.err_non_http2_data.fetch_add(1, Ordering::Relaxed);
-                                    }
-                                    ParseError::BadGrpcHdr => {
-                                        thread_stats.stat_ipv4.fetch_add(1, Ordering::Relaxed);
-                                        thread_stats.stat_tcp.fetch_add(1, Ordering::Relaxed);
-                                        thread_stats.stat_http2_data.fetch_add(1, Ordering::Relaxed);
-                                        thread_stats.err_bad_grpc.fetch_add(1, Ordering::Relaxed);
-                                    }
-                                    ParseError::PayloadOverflow => {
-                                        thread_stats.stat_ipv4.fetch_add(1, Ordering::Relaxed);
-                                        thread_stats.stat_tcp.fetch_add(1, Ordering::Relaxed);
-                                        thread_stats.stat_http2_data.fetch_add(1, Ordering::Relaxed);
-                                        thread_stats.err_l4_overflow.fetch_add(1, Ordering::Relaxed);
-                                    }
+                            ValidationError::Parse(parse_err) => match parse_err {
+                                ParseError::BufferTooSmall => {
+                                    thread_stats.err_too_small.fetch_add(1, Ordering::Relaxed);
                                 }
-                            }
+                                ParseError::NonIPv4 => {
+                                    thread_stats.err_non_ipv4.fetch_add(1, Ordering::Relaxed);
+                                }
+                                ParseError::BadIpHdrLen => {
+                                    thread_stats.err_bad_ip_len.fetch_add(1, Ordering::Relaxed);
+                                }
+                                ParseError::NonTCP => {
+                                    thread_stats.stat_ipv4.fetch_add(1, Ordering::Relaxed);
+                                    thread_stats.err_non_tcp.fetch_add(1, Ordering::Relaxed);
+                                }
+                                ParseError::BadIpChecksum => {
+                                    thread_stats.stat_ipv4.fetch_add(1, Ordering::Relaxed);
+                                    thread_stats.err_bad_ip_csum.fetch_add(1, Ordering::Relaxed);
+                                }
+                                ParseError::BadTcpHdrLen => {
+                                    thread_stats.stat_ipv4.fetch_add(1, Ordering::Relaxed);
+                                    thread_stats.stat_tcp.fetch_add(1, Ordering::Relaxed);
+                                    thread_stats.err_bad_tcp_len.fetch_add(1, Ordering::Relaxed);
+                                }
+                                ParseError::WrongPort => {
+                                    thread_stats.stat_ipv4.fetch_add(1, Ordering::Relaxed);
+                                    thread_stats.stat_tcp.fetch_add(1, Ordering::Relaxed);
+                                    thread_stats.err_wrong_port.fetch_add(1, Ordering::Relaxed);
+                                }
+                                ParseError::BadHttp2Hdr => {
+                                    thread_stats.stat_ipv4.fetch_add(1, Ordering::Relaxed);
+                                    thread_stats.stat_tcp.fetch_add(1, Ordering::Relaxed);
+                                    thread_stats.err_bad_http2.fetch_add(1, Ordering::Relaxed);
+                                }
+                                ParseError::NonHttp2Data => {
+                                    thread_stats.stat_ipv4.fetch_add(1, Ordering::Relaxed);
+                                    thread_stats.stat_tcp.fetch_add(1, Ordering::Relaxed);
+                                    thread_stats
+                                        .err_non_http2_data
+                                        .fetch_add(1, Ordering::Relaxed);
+                                }
+                                ParseError::BadGrpcHdr => {
+                                    thread_stats.stat_ipv4.fetch_add(1, Ordering::Relaxed);
+                                    thread_stats.stat_tcp.fetch_add(1, Ordering::Relaxed);
+                                    thread_stats.stat_http2_data.fetch_add(1, Ordering::Relaxed);
+                                    thread_stats.err_bad_grpc.fetch_add(1, Ordering::Relaxed);
+                                }
+                                ParseError::PayloadOverflow => {
+                                    thread_stats.stat_ipv4.fetch_add(1, Ordering::Relaxed);
+                                    thread_stats.stat_tcp.fetch_add(1, Ordering::Relaxed);
+                                    thread_stats.stat_http2_data.fetch_add(1, Ordering::Relaxed);
+                                    thread_stats.err_l4_overflow.fetch_add(1, Ordering::Relaxed);
+                                }
+                            },
                             ValidationError::Proto(proto_err) => {
                                 thread_stats.stat_ipv4.fetch_add(1, Ordering::Relaxed);
                                 thread_stats.stat_tcp.fetch_add(1, Ordering::Relaxed);
@@ -502,28 +574,44 @@ fn run_packet_loop(
 
                                 match proto_err {
                                     ProtoError::InvalidVarint => {
-                                        thread_stats.anomaly_invalid_varint.fetch_add(1, Ordering::Relaxed);
+                                        thread_stats
+                                            .anomaly_invalid_varint
+                                            .fetch_add(1, Ordering::Relaxed);
                                     }
                                     ProtoError::InvalidWireType => {
-                                        thread_stats.anomaly_invalid_wire_type.fetch_add(1, Ordering::Relaxed);
+                                        thread_stats
+                                            .anomaly_invalid_wire_type
+                                            .fetch_add(1, Ordering::Relaxed);
                                     }
                                     ProtoError::RecursionLimit => {
-                                        thread_stats.anomaly_recursion_limit.fetch_add(1, Ordering::Relaxed);
+                                        thread_stats
+                                            .anomaly_recursion_limit
+                                            .fetch_add(1, Ordering::Relaxed);
                                     }
                                     ProtoError::BufferUnderflow => {
-                                        thread_stats.anomaly_buffer_underflow.fetch_add(1, Ordering::Relaxed);
+                                        thread_stats
+                                            .anomaly_buffer_underflow
+                                            .fetch_add(1, Ordering::Relaxed);
                                     }
                                     ProtoError::ShapeDimensionLimit => {
-                                        thread_stats.anomaly_shape_dim_limit.fetch_add(1, Ordering::Relaxed);
+                                        thread_stats
+                                            .anomaly_shape_dim_limit
+                                            .fetch_add(1, Ordering::Relaxed);
                                     }
                                     ProtoError::ShapeValueInvalid => {
-                                        thread_stats.anomaly_shape_val_invalid.fetch_add(1, Ordering::Relaxed);
+                                        thread_stats
+                                            .anomaly_shape_val_invalid
+                                            .fetch_add(1, Ordering::Relaxed);
                                     }
                                     ProtoError::TensorSizeLimit => {
-                                        thread_stats.anomaly_tensor_size_limit.fetch_add(1, Ordering::Relaxed);
+                                        thread_stats
+                                            .anomaly_tensor_size_limit
+                                            .fetch_add(1, Ordering::Relaxed);
                                     }
                                     ProtoError::InvalidVarintBytes => {
-                                        thread_stats.anomaly_invalid_varint_bytes.fetch_add(1, Ordering::Relaxed);
+                                        thread_stats
+                                            .anomaly_invalid_varint_bytes
+                                            .fetch_add(1, Ordering::Relaxed);
                                     }
                                 }
                             }
@@ -555,9 +643,13 @@ fn run_packet_loop(
                 let produced = unsafe { tx_q.produce(&tx_descs[tx_offset..tx_index]) };
                 if produced > 0 {
                     for desc in tx_descs[tx_offset..(tx_offset + produced)].iter() {
-                        thread_stats.tx_bytes.fetch_add(desc.lengths().data() as u64, Ordering::Relaxed);
+                        thread_stats
+                            .tx_bytes
+                            .fetch_add(desc.lengths().data() as u64, Ordering::Relaxed);
                     }
-                    thread_stats.tx_packets.fetch_add(produced as u64, Ordering::Relaxed);
+                    thread_stats
+                        .tx_packets
+                        .fetch_add(produced as u64, Ordering::Relaxed);
                     total_tx_packets += produced as u64;
                     frames_in_tx += produced as i64;
                     frames_in_rx -= produced as i64;
@@ -578,7 +670,9 @@ fn run_packet_loop(
         // SAFETY: Reclaiming completed descriptors from Completion Queue.
         let completed = unsafe { cq.consume(&mut comp_descs[..]) };
         if completed > 0 {
-            thread_stats.recycled_packets.fetch_add(completed as u64, Ordering::Relaxed);
+            thread_stats
+                .recycled_packets
+                .fetch_add(completed as u64, Ordering::Relaxed);
             total_recycled_packets += completed as u64;
             frames_in_comp += completed as i64;
             frames_in_tx -= completed as i64;
