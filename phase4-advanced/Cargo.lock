@@ -256,9 +256,38 @@ dependencies = [
 name = "custos-multi-queue-sharding"
 version = "0.1.0"
 dependencies = [
+ "arc-swap",
+ "bytemuck",
+ "clap",
  "custos-common",
+ "custos-grpc-basic",
+ "custos-protobuf",
  "custos-tx-optimizations",
+ "libc",
+ "nix",
+ "serde",
+ "toml",
  "tracing",
+ "tracing-subscriber",
+ "xsk-rs",
+ "zerocopy",
+]
+
+[[package]]
+name = "custos-protobuf"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "clap",
+ "custos-common",
+ "custos-grpc-basic",
+ "libc",
+ "serde",
+ "toml",
+ "tracing",
+ "tracing-subscriber",
+ "xsk-rs",
+ "zerocopy",
 ]
 
 [[package]]

@@ -556,3 +556,8 @@ fn run_packet_loop(
         }
     }
 }
+
+#[cfg(not(target_os = "linux"))]
+fn main() -> Result<(), Box<dyn Error>> {
+    Err("AF_XDP packet processing is only supported on Linux".into())
+}

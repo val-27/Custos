@@ -17,7 +17,9 @@ phase4-advanced/
 │       └── lib.rs
 ├── multi-queue-sharding/      # Multi-core thread pinning & RSS queue steering
 │   ├── Cargo.toml
+│   ├── README.md
 │   └── src/
+│       ├── main.rs
 │       └── lib.rs
 ├── rules-engine/              # Hot-reloaded lock-free policy matching
 │   ├── Cargo.toml
@@ -78,8 +80,10 @@ On bare metal, performance is maximized by operating directly in native driver m
 #### 2. Running Custos-Sharded
 Run the multi-queue sharding binary pinning workers to isolated cores:
 ```bash
-sudo ./target/release/custos-sharded --interface eth0 --queues 0,1,2,3 --cores 2,3,4,5
+sudo ./target/release/custos-multi-queue-sharding --interface eth0 --queues 4 --cores 2,3,4,5
 ```
+
+See [`multi-queue-sharding/README.md`](multi-queue-sharding/README.md) for the daemon CLI and RSS setup details.
 
 ---
 
@@ -89,7 +93,7 @@ See [`k8s-integration/README.md`](k8s-integration/README.md) for the authoritati
 
 ---
 
-## Scaling Targets & Prometheus Monitoring
+## Scaling Targets & Monitoring
 
 ### Scaling Targets
 | Metric | Single-Core Target | 8-Core Sharded Target |
@@ -99,10 +103,7 @@ See [`k8s-integration/README.md`](k8s-integration/README.md) for the authoritati
 | **Latency (p99)** | < 15 microseconds | < 8 microseconds |
 
 ### Monitoring Setup
-Custos exports Prometheus metrics on `http://localhost:9090/metrics` or to `/tmp/custos_metrics.prom`:
-- `custos_rx_packets` (Counter): Total packets received.
-- `custos_anomalies_total{reason="tensor_size_limit"}` (Counter): Shape anomalies.
-- `custos_recycled_packets` (Counter): Rings buffer metrics.
+The multi-queue sharding daemon exports aggregated JSON metrics to `/tmp/custos_metrics.json`; see [`multi-queue-sharding/README.md`](multi-queue-sharding/README.md) for daemon-specific monitoring details.
 
 ---
 

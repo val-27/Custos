@@ -827,3 +827,8 @@ custos_payload_size_bucket{{le="2048"}} {}
         }
     }
 }
+
+#[cfg(not(target_os = "linux"))]
+fn main() -> Result<(), Box<dyn Error>> {
+    Err("AF_XDP packet processing is only supported on Linux".into())
+}

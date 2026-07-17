@@ -98,13 +98,18 @@ impl Xorshift {
         }
     }
 
-    fn next_u32(&mut self) -> u32 {
+    pub fn next_u32(&mut self) -> u32 {
         let mut x = self.state;
         x ^= x << 13;
         x ^= x >> 17;
         x ^= x << 5;
         self.state = x;
         x
+    }
+
+    #[allow(clippy::should_implement_trait)]
+    pub fn next(&mut self) -> u32 {
+        self.next_u32()
     }
 
     /// Returns a float between 0.0 and 1.0.
