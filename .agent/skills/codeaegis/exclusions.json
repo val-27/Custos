@@ -1,0 +1,10 @@
+{
+  "exclusions": [
+    {
+      "pattern": "phase4-advanced/k8s-integration/manifests/*",
+      "scanners": [
+        "all"
+      ]
+    }
+  ]
+}

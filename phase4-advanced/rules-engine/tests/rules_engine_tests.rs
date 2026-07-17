@@ -786,3 +786,177 @@ fn test_policy_parsing_json_toml() {
         Some(10)
     );
 }
+
+#[test]
+fn test_deep_recursion_attack() {
+    // Construct a deeply nested length-delimited message.
+    // A length-delimited field of tag 2: tag byte is (2 << 3) | 2 = 0x12 (18)
+    // We build it backwards to easily construct lengths.
+    let mut payload = vec![0x08, 0x2A]; // Base message: field 1 (varint) = 42
+
+    // Nest it 20 times: each nest adds tag 0x12, length of inner message, inner message.
+    for _ in 0..20 {
+        let len = payload.len();
+        let mut new_payload = vec![0x12];
+        new_payload.push(len as u8);
+        new_payload.extend_from_slice(&payload);
+        payload = new_payload;
+    }
+
+    // Set max_recursion_depth to 5
+    let policy = DynamicPolicy::try_from(Policy {
+        version: "1.0.0".to_string(),
+        description: None,
+        allowed_ports: None,
+        blocked_ips: None,
+        protobuf_rules: Some(ProtobufRules {
+            max_varint_bytes: None,
+            max_recursion_depth: Some(5),
+            field_allow_list: Some([1, 2].iter().cloned().collect()),
+            shape_rules: None,
+        }),
+    })
+    .unwrap();
+
+    let packet = build_mock_packet(
+        [192, 168, 1, 1],
+        [192, 168, 1, 2],
+        12345,
+        50051,
+        &payload,
+    );
+
+    assert_eq!(
+        match_packet(&packet, &policy),
+        MatchResult::Block(BlockReason::InvalidProto(custos_protobuf::ProtoError::RecursionLimit))
+    );
+}
+
+#[test]
+fn test_concurrent_policy_reload_under_load() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    use std::thread;
+
+    let policy_v1 = DynamicPolicy::try_from(Policy {
+        version: "1.0.0".to_string(),
+        description: None,
+        allowed_ports: None,
+        blocked_ips: None,
+        protobuf_rules: None,
+    })
+    .unwrap();
+
+    let manager = PolicyManager::new(policy_v1);
+    let running = Arc::new(AtomicBool::new(true));
+
+    // Spawn 4 reader threads
+    let mut readers = vec![];
+    for _ in 0..4 {
+        let mgr = manager.clone();
+        let run = running.clone();
+        let handle = thread::spawn(move || {
+            let packet = build_mock_packet([192, 168, 1, 1], [192, 168, 1, 2], 12345, 50051, &[0x08, 0x2A]);
+            while run.load(Ordering::Relaxed) {
+                let policy = mgr.get_policy();
+                let result = match_packet(&packet, &policy);
+                assert_eq!(result, MatchResult::Allow);
+            }
+        });
+        readers.push(handle);
+    }
+
+    // Spawn 1 writer thread that reloads policy
+    let mgr_write = manager.clone();
+    let run_write = running.clone();
+    let writer = thread::spawn(move || {
+        let mut iter = 0;
+        while run_write.load(Ordering::Relaxed) {
+            let version_str = format!("2.0.{}", iter);
+            let policy_new = DynamicPolicy::try_from(Policy {
+                version: version_str,
+                description: None,
+                allowed_ports: None,
+                blocked_ips: None,
+                protobuf_rules: None,
+            })
+            .unwrap();
+            mgr_write.reload(policy_new);
+            iter += 1;
+            thread::sleep(std::time::Duration::from_millis(1));
+            if iter > 200 {
+                break;
+            }
+        }
+        run_write.store(false, Ordering::Relaxed);
+    });
+
+    writer.join().unwrap();
+    for reader in readers {
+        reader.join().unwrap();
+    }
+}
+
+#[test]
+fn test_malformed_varint_and_buffer_underflow_edge_cases() {
+    let policy = DynamicPolicy::try_from(Policy {
+        version: "1.0.0".to_string(),
+        description: None,
+        allowed_ports: None,
+        blocked_ips: None,
+        protobuf_rules: Some(ProtobufRules {
+            max_varint_bytes: Some(10),
+            max_recursion_depth: None,
+            field_allow_list: Some([1, 2].iter().cloned().collect()),
+            shape_rules: None,
+        }),
+    })
+    .unwrap();
+
+    // Case 1: Varint exceeding 10 bytes
+    // Tag: 0x08 (field 1, wire 0)
+    // 11 bytes of 0xff (with MSB set) followed by 0x01
+    let malformed_varint = vec![
+        0x08, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x01,
+    ];
+    let packet1 = build_mock_packet(
+        [192, 168, 1, 1],
+        [192, 168, 1, 2],
+        12345,
+        50051,
+        &malformed_varint,
+    );
+    assert_eq!(
+        match_packet(&packet1, &policy),
+        MatchResult::Block(BlockReason::InvalidProto(custos_protobuf::ProtoError::InvalidVarint))
+    );
+
+    // Case 2: Buffer finishes in the middle of a varint (unexpected EOF)
+    let truncated_varint = vec![0x08, 0xff];
+    let packet2 = build_mock_packet(
+        [192, 168, 1, 1],
+        [192, 168, 1, 2],
+        12345,
+        50051,
+        &truncated_varint,
+    );
+    assert_eq!(
+        match_packet(&packet2, &policy),
+        MatchResult::Block(BlockReason::InvalidProto(custos_protobuf::ProtoError::BufferUnderflow))
+    );
+
+    // Case 3: Tag specifies length-delimited field (wire type 2), but field length causes overflow/underflow.
+    let invalid_len_delim = vec![0x0a, 0xff, 0xff, 0xff, 0xff, 0x07, 0x01];
+    let packet3 = build_mock_packet(
+        [192, 168, 1, 1],
+        [192, 168, 1, 2],
+        12345,
+        50051,
+        &invalid_len_delim,
+    );
+    assert_eq!(
+        match_packet(&packet3, &policy),
+        MatchResult::Block(BlockReason::InvalidProto(custos_protobuf::ProtoError::BufferUnderflow))
+    );
+}
+
