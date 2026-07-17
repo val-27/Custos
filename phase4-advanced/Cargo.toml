@@ -5,6 +5,8 @@ members = [
     "k8s-integration",
     "rules-engine",
     "tx-optimizations",
+    "benchmark-tool",
 ]
+
 
 

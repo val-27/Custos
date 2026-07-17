@@ -15,6 +15,12 @@ phase4-advanced/
 │       │   ├── daemon.rs
 │       │   └── worker.rs
 │       └── lib.rs
+├── benchmark-tool/            # Traffic generation, monitoring dashboards, and reports
+│   ├── Cargo.toml
+│   ├── README.md
+│   └── src/
+│       ├── lib.rs
+│       └── main.rs
 ├── multi-queue-sharding/      # Multi-core thread pinning & RSS queue steering
 │   ├── Cargo.toml
 │   ├── README.md
@@ -54,6 +60,10 @@ phase4-advanced/
    - **Purpose**: Throughput optimization of the transmission path.
    - **Dependencies**: `custos-common`, `libc`, `tracing`, and `xsk-rs` on Linux.
    - **Conventions**: Batching of TX submissions, platform-specific prefetching of UMEM descriptors, NUMA-node core affinity, and a mock benchmark path for non-Linux development. See `tx-optimizations/README.md` for benchmark usage.
+5. **`benchmark-tool`**:
+   - **Purpose**: Generates validation traffic, monitors live daemon metrics, and writes HTML/JSON benchmark reports.
+   - **Dependencies**: See [`benchmark-tool/Cargo.toml`](benchmark-tool/Cargo.toml).
+   - **Conventions**: See [`benchmark-tool/README.md`](benchmark-tool/README.md) for CLI usage, profiles, PCAP export, and dashboard behavior.
 
 ---
 
