@@ -3,9 +3,9 @@
 
 /// Prefetches a packet data descriptor cacheline.
 pub fn prefetch_cacheline(addr: *const u8) {
-    // SAFETY: Safe prefetch instruction wrapper that does not affect execution state
-    unsafe {
-        #[cfg(target_arch = "x86_64")]
-        std::arch::x86_64::_mm_prefetch(addr as *const i8, std::arch::x86_64::_MM_HINT_T0);
-    }
+    #[cfg(target_arch = "x86_64")]
+    std::arch::x86_64::_mm_prefetch(addr as *const i8, std::arch::x86_64::_MM_HINT_T0);
+
+    #[cfg(not(target_arch = "x86_64"))]
+    let _ = addr;
 }

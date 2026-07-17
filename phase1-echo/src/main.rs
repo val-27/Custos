@@ -4,11 +4,11 @@
 //! processes them (either dropping them or swapping MAC addresses for echo),
 //! and submits them to the Tx ring. Employs zero heap allocations in the hot path.
 
-use std::error::Error;
 #[cfg(target_os = "linux")]
 use clap::Parser;
 #[cfg(target_os = "linux")]
 use std::convert::TryInto;
+use std::error::Error;
 #[cfg(target_os = "linux")]
 use std::num::NonZeroU32;
 #[cfg(target_os = "linux")]

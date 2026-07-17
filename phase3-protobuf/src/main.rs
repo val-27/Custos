@@ -3,15 +3,17 @@
 //! Validates Ethernet, IPv4, TCP, HTTP/2, gRPC, and Protobuf layers zero-copy.
 //! Configures rules via TOML, exports Prometheus/JSON metrics, and runs with zero heap allocations in the hot path.
 
-use std::error::Error;
 #[cfg(target_os = "linux")]
 use clap::Parser;
 #[cfg(target_os = "linux")]
 use custos_grpc_basic::ParseError;
 #[cfg(target_os = "linux")]
-use custos_protobuf::{validate_grpc_protobuf_packet, ProtoError, ValidationConfig, ValidationError};
+use custos_protobuf::{
+    validate_grpc_protobuf_packet, ProtoError, ValidationConfig, ValidationError,
+};
 #[cfg(target_os = "linux")]
 use std::convert::TryInto;
+use std::error::Error;
 #[cfg(target_os = "linux")]
 use std::fs::File;
 #[cfg(target_os = "linux")]
@@ -103,9 +105,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     } else {
         Level::INFO
     };
-    let subscriber = FmtSubscriber::builder()
-        .with_max_level(log_level)
-        .finish();
+    let subscriber = FmtSubscriber::builder().with_max_level(log_level).finish();
     tracing::subscriber::set_global_default(subscriber)?;
 
     info!("Starting custos-phase3-protobuf...");
@@ -149,7 +149,10 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     // 3. Interface Resolution
     let if_name: Interface = args.interface.parse().map_err(|e| {
-        error!("Failed to parse interface name '{}': {:?}", args.interface, e);
+        error!(
+            "Failed to parse interface name '{}': {:?}",
+            args.interface, e
+        );
         e
     })?;
 
@@ -169,16 +172,15 @@ fn main() -> Result<(), Box<dyn Error>> {
     let frame_count_nonzero = NonZeroU32::new(args.frame_count)
         .ok_or("Frame count must be non-zero and a power of two")?;
 
-    let (umem, frame_descs) = Umem::new(
-        umem_config,
-        frame_count_nonzero,
-        use_huge_pages,
-    )
-    .map_err(|e| {
-        error!("Failed to initialize UMEM: {:?}", e);
-        e
-    })?;
-    info!("Initialized UMEM with {} frames (2KB size)", args.frame_count);
+    let (umem, frame_descs) =
+        Umem::new(umem_config, frame_count_nonzero, use_huge_pages).map_err(|e| {
+            error!("Failed to initialize UMEM: {:?}", e);
+            e
+        })?;
+    info!(
+        "Initialized UMEM with {} frames (2KB size)",
+        args.frame_count
+    );
 
     // 5. Socket Configuration
     let mut socket_config_builder = SocketConfig::builder();
@@ -192,20 +194,17 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     let socket_config = socket_config_builder.bind_flags(bind_flags).build();
 
-    let (tx_q, rx_q, fq_and_cq) = unsafe {
-        Socket::new(
-            socket_config,
-            &umem,
-            &if_name,
-            args.queue_id,
-        )
-    }
-    .map_err(|e| {
-        error!("Failed to initialize AF_XDP socket: {:?}", e);
-        e
-    })?;
-    let (mut fq, cq) = fq_and_cq.ok_or("Expected Fill and Completion queues from socket creation")?;
-    info!("Bound AF_XDP socket to interface: {}, queue: {}", args.interface, args.queue_id);
+    let (tx_q, rx_q, fq_and_cq) =
+        unsafe { Socket::new(socket_config, &umem, &if_name, args.queue_id) }.map_err(|e| {
+            error!("Failed to initialize AF_XDP socket: {:?}", e);
+            e
+        })?;
+    let (mut fq, cq) =
+        fq_and_cq.ok_or("Expected Fill and Completion queues from socket creation")?;
+    info!(
+        "Bound AF_XDP socket to interface: {}, queue: {}",
+        args.interface, args.queue_id
+    );
 
     // 6. Populate Fill Queue with all available UMEM frames
     let produced = unsafe { fq.produce(&frame_descs) };
@@ -440,11 +439,16 @@ fn run_packet_loop(
                                     ProtoError::ShapeDimensionLimit => anomaly_shape_dim_limit += 1,
                                     ProtoError::ShapeValueInvalid => anomaly_shape_val_invalid += 1,
                                     ProtoError::TensorSizeLimit => anomaly_tensor_size_limit += 1,
-                                    ProtoError::InvalidVarintBytes => anomaly_invalid_varint_bytes += 1,
+                                    ProtoError::InvalidVarintBytes => {
+                                        anomaly_invalid_varint_bytes += 1
+                                    }
                                 }
 
                                 if args.verbose {
-                                    debug!("Protobuf anomaly validation failure (dropped): {:?}", proto_err);
+                                    debug!(
+                                        "Protobuf anomaly validation failure (dropped): {:?}",
+                                        proto_err
+                                    );
                                 }
                             }
                         }
@@ -590,11 +594,40 @@ fn run_packet_loop(
     "1025_2048": {}
   }}
 }}"#,
-                rx_packets, tx_packets, recycled_packets, drop_validation_failed, rx_bytes, tx_bytes,
-                stat_ipv4, stat_tcp, stat_http2_data, stat_grpc, stat_protobuf,
-                err_too_small, err_non_ipv4, err_bad_ip_len, err_non_tcp, err_bad_ip_csum, err_bad_tcp_len, err_wrong_port, err_bad_http2, err_non_http2_data, err_bad_grpc, err_l4_overflow,
-                anomaly_invalid_varint, anomaly_invalid_wire_type, anomaly_recursion_limit, anomaly_buffer_underflow, anomaly_shape_dim_limit, anomaly_shape_val_invalid, anomaly_tensor_size_limit, anomaly_invalid_varint_bytes,
-                hist_payload_0_64, hist_payload_65_256, hist_payload_257_1024, hist_payload_1025_2048
+                rx_packets,
+                tx_packets,
+                recycled_packets,
+                drop_validation_failed,
+                rx_bytes,
+                tx_bytes,
+                stat_ipv4,
+                stat_tcp,
+                stat_http2_data,
+                stat_grpc,
+                stat_protobuf,
+                err_too_small,
+                err_non_ipv4,
+                err_bad_ip_len,
+                err_non_tcp,
+                err_bad_ip_csum,
+                err_bad_tcp_len,
+                err_wrong_port,
+                err_bad_http2,
+                err_non_http2_data,
+                err_bad_grpc,
+                err_l4_overflow,
+                anomaly_invalid_varint,
+                anomaly_invalid_wire_type,
+                anomaly_recursion_limit,
+                anomaly_buffer_underflow,
+                anomaly_shape_dim_limit,
+                anomaly_shape_val_invalid,
+                anomaly_tensor_size_limit,
+                anomaly_invalid_varint_bytes,
+                hist_payload_0_64,
+                hist_payload_65_256,
+                hist_payload_257_1024,
+                hist_payload_1025_2048
             );
 
             if let Ok(mut file) = File::create("/tmp/custos_metrics.json") {
@@ -663,11 +696,39 @@ custos_payload_size_bucket{{le="256"}} {}
 custos_payload_size_bucket{{le="1024"}} {}
 custos_payload_size_bucket{{le="2048"}} {}
 "#,
-                rx_packets, tx_packets, recycled_packets, drop_validation_failed, rx_bytes,
-                stat_ipv4, stat_tcp, stat_http2_data, stat_grpc, stat_protobuf,
-                err_too_small, err_non_ipv4, err_bad_ip_len, err_non_tcp, err_bad_ip_csum, err_bad_tcp_len, err_wrong_port, err_bad_http2, err_non_http2_data, err_bad_grpc, err_l4_overflow,
-                anomaly_invalid_varint, anomaly_invalid_wire_type, anomaly_recursion_limit, anomaly_buffer_underflow, anomaly_shape_dim_limit, anomaly_shape_val_invalid, anomaly_tensor_size_limit, anomaly_invalid_varint_bytes,
-                hist_payload_0_64, hist_payload_65_256, hist_payload_257_1024, hist_payload_1025_2048
+                rx_packets,
+                tx_packets,
+                recycled_packets,
+                drop_validation_failed,
+                rx_bytes,
+                stat_ipv4,
+                stat_tcp,
+                stat_http2_data,
+                stat_grpc,
+                stat_protobuf,
+                err_too_small,
+                err_non_ipv4,
+                err_bad_ip_len,
+                err_non_tcp,
+                err_bad_ip_csum,
+                err_bad_tcp_len,
+                err_wrong_port,
+                err_bad_http2,
+                err_non_http2_data,
+                err_bad_grpc,
+                err_l4_overflow,
+                anomaly_invalid_varint,
+                anomaly_invalid_wire_type,
+                anomaly_recursion_limit,
+                anomaly_buffer_underflow,
+                anomaly_shape_dim_limit,
+                anomaly_shape_val_invalid,
+                anomaly_tensor_size_limit,
+                anomaly_invalid_varint_bytes,
+                hist_payload_0_64,
+                hist_payload_65_256,
+                hist_payload_257_1024,
+                hist_payload_1025_2048
             );
 
             if let Ok(mut file) = File::create("/tmp/custos_metrics.prom") {

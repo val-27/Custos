@@ -4,7 +4,6 @@
 //! AF_XDP socket, dedicated rings, and isolated UMEM. Communicates dynamically
 //! through an ArcSwap-based policy/configuration reloading and aggregates lock-free stats.
 
-use std::error::Error;
 #[cfg(target_os = "linux")]
 use clap::Parser;
 #[cfg(target_os = "linux")]
@@ -21,6 +20,7 @@ use custos_protobuf::{
 use nix::sys::signal::{sigaction, SaFlags, SigAction, SigHandler, SigSet, Signal};
 #[cfg(target_os = "linux")]
 use std::convert::TryInto;
+use std::error::Error;
 #[cfg(target_os = "linux")]
 use std::num::NonZeroU32;
 #[cfg(target_os = "linux")]
