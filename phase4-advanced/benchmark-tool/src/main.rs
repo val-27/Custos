@@ -49,7 +49,7 @@ struct Args {
     interface: Option<String>,
 
     /// Target packet injection rate (Packets Per Second) for custom profiles
-    #[arg(short, long)]
+    #[arg(long)]
     pps: Option<u64>,
 
     /// Export the simulated traffic to a PCAP file at this path
