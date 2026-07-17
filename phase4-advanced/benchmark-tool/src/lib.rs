@@ -95,9 +95,7 @@ pub fn generate_packet(params: &PacketGenParams) -> Vec<u8> {
         TrafficProfile::ShapeDimLimitExceeded => {
             // Generates more than 16 dimensions (dimension limit is 16 in parser buffer)
             let mut payload = vec![0x0a, 20];
-            for _ in 0..20 {
-                payload.push(1);
-            }
+            payload.extend(std::iter::repeat_n(1, 20));
             payload
         }
         TrafficProfile::RecursionLimitExceeded => {
@@ -151,7 +149,7 @@ pub fn generate_packet(params: &PacketGenParams) -> Vec<u8> {
     let total_l3_len = total_l4_len + 20; // IP header is 20 bytes minimum
 
     // Allocate buffer
-    let buffer_size = 14 + (total_l3_len as usize);
+    let buffer_size = 14 + total_l3_len;
     let mut buf = vec![0u8; buffer_size];
 
     // 2. Ethernet Header
@@ -234,7 +232,7 @@ pub fn generate_packet(params: &PacketGenParams) -> Vec<u8> {
     tcp_bytes.extend_from_slice(&proto_payload);
 
     // Padding if odd size
-    if tcp_bytes.len() % 2 != 0 {
+    if !tcp_bytes.len().is_multiple_of(2) {
         tcp_bytes.push(0);
     }
 
@@ -292,7 +290,7 @@ impl<W: Write> PcapWriter<W> {
     /// Appends a packet to the PCAP file.
     pub fn write_packet(&mut self, timestamp: Duration, packet: &[u8]) -> io::Result<()> {
         let ts_sec = timestamp.as_secs() as u32;
-        let ts_usec = timestamp.subsec_micros() as u32;
+        let ts_usec = timestamp.subsec_micros();
         let len = packet.len() as u32;
 
         // Record header (16 bytes)
@@ -470,8 +468,8 @@ pub fn render_svg_chart(
 
         chart
             .configure_mesh()
-            .bold_line_style(&RGBAColor(60, 70, 80, 0.4))
-            .light_line_style(&RGBAColor(50, 60, 70, 0.2))
+            .bold_line_style(RGBAColor(60, 70, 80, 0.4))
+            .light_line_style(RGBAColor(50, 60, 70, 0.2))
             .x_label_formatter(&|x| {
                 if *x < labels.len() {
                     labels[*x].clone()
@@ -479,7 +477,7 @@ pub fn render_svg_chart(
                     String::new()
                 }
             })
-            .axis_style(&RGBAColor(120, 130, 140, 0.8))
+            .axis_style(RGBAColor(120, 130, 140, 0.8))
             .label_style(("sans-serif", 10, &RGBAColor(200, 200, 200, 0.9)))
             .draw()?;
 
@@ -494,7 +492,7 @@ pub fn render_svg_chart(
         chart.draw_series(AreaSeries::new(
             (0..data.len()).map(|x| (x, data[x])),
             0.0,
-            &area_color,
+            area_color,
         ))?;
 
         // Draw line
@@ -537,8 +535,8 @@ pub fn render_latency_histogram(
 
         chart
             .configure_mesh()
-            .bold_line_style(&RGBAColor(60, 70, 80, 0.4))
-            .light_line_style(&RGBAColor(50, 60, 70, 0.2))
+            .bold_line_style(RGBAColor(60, 70, 80, 0.4))
+            .light_line_style(RGBAColor(50, 60, 70, 0.2))
             .x_label_formatter(&|x: &i32| {
                 let idx = *x as usize;
                 if idx < 4 {
@@ -547,7 +545,7 @@ pub fn render_latency_histogram(
                     String::new()
                 }
             })
-            .axis_style(&RGBAColor(120, 130, 140, 0.8))
+            .axis_style(RGBAColor(120, 130, 140, 0.8))
             .label_style(("sans-serif", 10, &RGBAColor(200, 200, 200, 0.9)))
             .draw()?;
 
