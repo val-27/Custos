@@ -5,4 +5,18 @@ edition = "2021"
 
 [dependencies]
 custos-common = { path = "../../common" }
+custos-grpc-basic = { path = "../../phase2-grpc-basic" }
+custos-protobuf = { path = "../../phase3-protobuf" }
+xsk-rs = "0.8.0"
+clap = { version = "4.5.1", features = ["derive"] }
+libc = "0.2.153"
+zerocopy = { version = "0.7.32", features = ["derive"] }
+bytemuck = { version = "1.16.1", features = ["derive"] }
 tracing = "0.1.40"
+tracing-subscriber = { version = "0.3.18", features = ["env-filter"] }
+arc-swap = "1.7.1"
+serde = { version = "1.0", features = ["derive"] }
+toml = "0.8"
+nix = { version = "0.30.1", features = ["signal"] }
+
+
