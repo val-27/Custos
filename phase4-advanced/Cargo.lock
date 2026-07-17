@@ -251,6 +251,7 @@ dependencies = [
  "custos-common",
  "custos-grpc-basic",
  "custos-protobuf",
+ "custos-tx-optimizations",
  "libc",
  "nix",
  "serde",
@@ -291,7 +292,10 @@ dependencies = [
 name = "custos-tx-optimizations"
 version = "0.1.0"
 dependencies = [
+ "custos-common",
+ "libc",
  "tracing",
+ "xsk-rs",
 ]
 
 [[package]]

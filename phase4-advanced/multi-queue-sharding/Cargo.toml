@@ -7,6 +7,7 @@ edition = "2021"
 custos-common = { path = "../../common" }
 custos-grpc-basic = { path = "../../phase2-grpc-basic" }
 custos-protobuf = { path = "../../phase3-protobuf" }
+custos-tx-optimizations = { path = "../tx-optimizations" }
 clap = { version = "4.5.1", features = ["derive"] }
 libc = "0.2.153"
 zerocopy = { version = "0.7.32", features = ["derive"] }
