@@ -49,7 +49,7 @@ fn build_mock_packet(src_ip: [u8; 4], dst_ip: [u8; 4]) -> Vec<u8> {
         src_ip,
         dst_ip,
     };
-    let csum = calculate_checksum(&ip.as_bytes());
+    let csum = calculate_checksum(ip.as_bytes());
     ip.hdr_checksum = U16::new(csum);
     buf[14..34].copy_from_slice(ip.as_bytes());
 

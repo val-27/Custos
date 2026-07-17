@@ -3,13 +3,13 @@
 //! Provides the core packet generator, PCAP writer, metrics tracker,
 //! and visualization services (web dashboard and reporting).
 
+use serde::{Deserialize, Serialize};
 use std::io::{self, Write};
 use std::time::Duration;
-use serde::{Deserialize, Serialize};
 use zerocopy::byteorder::network_endian::{U16, U32};
 use zerocopy::AsBytes;
 
-use custos_grpc_basic::{EtherHdr, IpHdr, TcpHdr, Http2Hdr, GrpcHdr, calculate_checksum};
+use custos_grpc_basic::{calculate_checksum, EtherHdr, GrpcHdr, Http2Hdr, IpHdr, TcpHdr};
 
 // =========================================================================
 // 1. Packet Generation Engine
@@ -80,8 +80,8 @@ pub fn generate_packet(params: &PacketGenParams) -> Vec<u8> {
     let proto_payload = match params.profile {
         TrafficProfile::ValidPacked => {
             // Shape: [1, 3, 224, 224] (packed)
-            // Tag: 0x0a (field 1, wire type 2), Length: 5, Values: 1, 3, 224, 224
-            vec![0x0a, 5, 1, 3, 0xe0, 0x01, 0xe0, 0x01]
+            // Tag: 0x0a (field 1, wire type 2), Length: 6, Values: 1, 3, 224, 224
+            vec![0x0a, 6, 1, 3, 0xe0, 0x01, 0xe0, 0x01]
         }
         TrafficProfile::ValidUnpacked => {
             // Shape: [1, 3, 10] (unpacked)
@@ -95,9 +95,7 @@ pub fn generate_packet(params: &PacketGenParams) -> Vec<u8> {
         TrafficProfile::ShapeDimLimitExceeded => {
             // Generates more than 16 dimensions (dimension limit is 16 in parser buffer)
             let mut payload = vec![0x0a, 20];
-            for _ in 0..20 {
-                payload.push(1);
-            }
+            payload.extend(std::iter::repeat_n(1, 20));
             payload
         }
         TrafficProfile::RecursionLimitExceeded => {
@@ -112,7 +110,9 @@ pub fn generate_packet(params: &PacketGenParams) -> Vec<u8> {
         }
         TrafficProfile::InvalidVarint => {
             // A varint exceeding 10 bytes standard limit
-            vec![0x08, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x01]
+            vec![
+                0x08, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x01,
+            ]
         }
         TrafficProfile::BufferUnderflow => {
             // Declares length 100 but only provides 3 bytes
@@ -124,7 +124,7 @@ pub fn generate_packet(params: &PacketGenParams) -> Vec<u8> {
         }
         _ => {
             // For other headers-only failures, use valid protobuf payload
-            vec![0x0a, 5, 1, 3, 0xe0, 0x01, 0xe0, 0x01]
+            vec![0x0a, 6, 1, 3, 0xe0, 0x01, 0xe0, 0x01]
         }
     };
 
@@ -132,7 +132,7 @@ pub fn generate_packet(params: &PacketGenParams) -> Vec<u8> {
     let proto_len = proto_payload.len();
     let mut grpc_payload_len = proto_len;
     let http2_payload_len = proto_len + 5; // Includes 5 bytes gRPC header
-    
+
     if let TrafficProfile::BadGrpc = params.profile {
         // Bad gRPC: message len field is corrupted or larger than HTTP2 frame
         grpc_payload_len = proto_len + 1000;
@@ -145,16 +145,11 @@ pub fn generate_packet(params: &PacketGenParams) -> Vec<u8> {
     }
 
     let total_l5_len = http2_payload_len + 9; // HTTP2 header is 9 bytes
-    let total_l4_len = total_l5_len + 20;    // TCP header is 20 bytes minimum
-    let mut total_l3_len = total_l4_len + 20; // IP header is 20 bytes minimum
-
-    if let TrafficProfile::BadIpHdrLen = params.profile {
-        // Malformed IP length
-        total_l3_len = 10;
-    }
+    let total_l4_len = total_l5_len + 20; // TCP header is 20 bytes minimum
+    let total_l3_len = total_l4_len + 20; // IP header is 20 bytes minimum
 
     // Allocate buffer
-    let buffer_size = 14 + (total_l3_len as usize);
+    let buffer_size = 14 + total_l3_len;
     let mut buf = vec![0u8; buffer_size];
 
     // 2. Ethernet Header
@@ -237,7 +232,7 @@ pub fn generate_packet(params: &PacketGenParams) -> Vec<u8> {
     tcp_bytes.extend_from_slice(&proto_payload);
 
     // Padding if odd size
-    if tcp_bytes.len() % 2 != 0 {
+    if !tcp_bytes.len().is_multiple_of(2) {
         tcp_bytes.push(0);
     }
 
@@ -256,14 +251,14 @@ pub fn generate_packet(params: &PacketGenParams) -> Vec<u8> {
     } else {
         calculate_checksum(&pseudo_hdr)
     };
-    
+
     tcp.checksum = U16::new(tcp_csum);
     buf[34..54].copy_from_slice(tcp.as_bytes());
 
     // 5. HTTP/2 and gRPC payloads
     buf[54..63].copy_from_slice(h2_hdr.as_bytes());
     buf[63..68].copy_from_slice(grpc_hdr.as_bytes());
-    buf[68..68+proto_len].copy_from_slice(&proto_payload);
+    buf[68..68 + proto_len].copy_from_slice(&proto_payload);
 
     buf
 }
@@ -295,7 +290,7 @@ impl<W: Write> PcapWriter<W> {
     /// Appends a packet to the PCAP file.
     pub fn write_packet(&mut self, timestamp: Duration, packet: &[u8]) -> io::Result<()> {
         let ts_sec = timestamp.as_secs() as u32;
-        let ts_usec = timestamp.subsec_micros() as u32;
+        let ts_usec = timestamp.subsec_micros();
         let len = packet.len() as u32;
 
         // Record header (16 bytes)
@@ -435,7 +430,10 @@ impl PerformanceHistory {
 // =========================================================================
 
 /// Measures overhead of the validation engine.
-pub fn run_in_memory_validation(packet: &[u8], config: &custos_protobuf::ValidationConfig) -> Result<([i64; 16], usize), custos_protobuf::ValidationError> {
+pub fn run_in_memory_validation(
+    packet: &[u8],
+    config: &custos_protobuf::ValidationConfig,
+) -> Result<([i64; 16], usize), custos_protobuf::ValidationError> {
     custos_protobuf::validate_grpc_protobuf_packet(packet, config)
 }
 
@@ -468,9 +466,10 @@ pub fn render_svg_chart(
             .y_label_area_size(40)
             .build_cartesian_2d(0..data.len(), 0.0..max_val)?;
 
-        chart.configure_mesh()
-            .bold_line_style(&RGBAColor(60, 70, 80, 0.4))
-            .light_line_style(&RGBAColor(50, 60, 70, 0.2))
+        chart
+            .configure_mesh()
+            .bold_line_style(RGBAColor(60, 70, 80, 0.4))
+            .light_line_style(RGBAColor(50, 60, 70, 0.2))
             .x_label_formatter(&|x| {
                 if *x < labels.len() {
                     labels[*x].clone()
@@ -478,7 +477,7 @@ pub fn render_svg_chart(
                     String::new()
                 }
             })
-            .axis_style(&RGBAColor(120, 130, 140, 0.8))
+            .axis_style(RGBAColor(120, 130, 140, 0.8))
             .label_style(("sans-serif", 10, &RGBAColor(200, 200, 200, 0.9)))
             .draw()?;
 
@@ -490,20 +489,18 @@ pub fn render_svg_chart(
         let area_color = RGBAColor(r, g, b, 0.15);
 
         // Draw area under line
-        chart.draw_series(
-            AreaSeries::new(
-                (0..data.len()).map(|x| (x, data[x])),
-                0.0,
-                &area_color,
-            )
-        )?;
+        chart.draw_series(AreaSeries::new(
+            (0..data.len()).map(|x| (x, data[x])),
+            0.0,
+            area_color,
+        ))?;
 
         // Draw line
         chart.draw_series(LineSeries::new(
             (0..data.len()).map(|x| (x, data[x])),
             &plot_color,
         ))?;
-        
+
         root.present()?;
     }
 
@@ -527,15 +524,19 @@ pub fn render_latency_histogram(
         let max_val = if max_val == 0.0 { 1.0 } else { max_val };
 
         let mut chart = ChartBuilder::on(&root)
-            .caption("Packet Latency Profile (microseconds)", ("sans-serif", 16, &WHITE))
+            .caption(
+                "Packet Latency Profile (microseconds)",
+                ("sans-serif", 16, &WHITE),
+            )
             .margin(10)
             .x_label_area_size(30)
             .y_label_area_size(45)
             .build_cartesian_2d(0..4, 0.0..max_val)?;
 
-        chart.configure_mesh()
-            .bold_line_style(&RGBAColor(60, 70, 80, 0.4))
-            .light_line_style(&RGBAColor(50, 60, 70, 0.2))
+        chart
+            .configure_mesh()
+            .bold_line_style(RGBAColor(60, 70, 80, 0.4))
+            .light_line_style(RGBAColor(50, 60, 70, 0.2))
             .x_label_formatter(&|x: &i32| {
                 let idx = *x as usize;
                 if idx < 4 {
@@ -544,24 +545,19 @@ pub fn render_latency_histogram(
                     String::new()
                 }
             })
-            .axis_style(&RGBAColor(120, 130, 140, 0.8))
+            .axis_style(RGBAColor(120, 130, 140, 0.8))
             .label_style(("sans-serif", 10, &RGBAColor(200, 200, 200, 0.9)))
             .draw()?;
 
-        chart.draw_series(
-            (0..4).map(|x: i32| {
-                let color = match x {
-                    0 => RGBAColor(46, 204, 113, 0.8),  // emerald green
-                    1 => RGBAColor(52, 152, 219, 0.8),  // blue
-                    2 => RGBAColor(241, 196, 15, 0.8),  // yellow
-                    _ => RGBAColor(231, 76, 60, 0.8),   // red
-                };
-                Rectangle::new(
-                    [(x, 0.0), (x + 1, values[x as usize])],
-                    color.filled(),
-                )
-            })
-        )?;
+        chart.draw_series((0..4).map(|x: i32| {
+            let color = match x {
+                0 => RGBAColor(46, 204, 113, 0.8), // emerald green
+                1 => RGBAColor(52, 152, 219, 0.8), // blue
+                2 => RGBAColor(241, 196, 15, 0.8), // yellow
+                _ => RGBAColor(231, 76, 60, 0.8),  // red
+            };
+            Rectangle::new([(x, 0.0), (x + 1, values[x as usize])], color.filled())
+        }))?;
 
         root.present()?;
     }
@@ -584,7 +580,7 @@ pub fn generate_html_report(
     latency_svg: &str,
 ) -> String {
     let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
-    
+
     format!(
         r#"<!DOCTYPE html>
 <html lang="en">

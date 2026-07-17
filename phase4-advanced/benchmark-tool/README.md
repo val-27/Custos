@@ -54,7 +54,7 @@ Options:
       --web-port <WEB_PORT>      Port to serve the interactive web dashboard on [default: 8080]
       --report-out <REPORT_OUT>  Output path for the HTML/PDF printable report [default: custos_bench_report.html]
       --json-out <JSON_OUT>      Output path for the raw JSON metrics report [default: custos_bench_metrics.json]
-      --mock-target              Use in-memory simulator target instead of physical interface [default: true]
+      --mock-target              Use in-memory simulator target instead of physical interface
       --metrics-json <PATH>      Path to read Custos metrics JSON from in monitor mode [default: /tmp/custos_metrics.json]
   -h, --help                     Print help
 ```
@@ -66,7 +66,7 @@ Options:
 ### 1. Run an In-Memory Stress Test (Portability Mode)
 Execute a 30-second sustained stress test in memory. This measures how fast the parser can walk the Protobuf schemas on your current hardware without requiring network root access:
 ```bash
-./target/release/custos-bench bench --profile sustained --duration 30 --web-port 8080
+./target/release/custos-bench bench --profile sustained --duration 30 --mock-target --web-port 8080
 ```
 Then open `http://localhost:8080` in your browser to view the live HTMX dashboard.
 

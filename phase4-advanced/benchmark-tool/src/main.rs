@@ -4,21 +4,21 @@
 //! Axum web server, and packet generator for Custos.
 
 use clap::{Parser, ValueEnum};
+use rand::Rng;
 use std::fs::File;
+use std::io::IsTerminal;
 use std::io::{self, Write};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::Mutex;
 use sysinfo::System;
-use std::io::IsTerminal;
-use rand::Rng;
+use tokio::sync::Mutex;
 
 use custos_bench::{
-    generate_packet, render_latency_histogram, render_svg_chart, generate_html_report,
-    CustosMetrics, LatencyStats, PacketGenParams, PcapWriter, PerformanceHistory,
-    RateMetrics, TrafficProfile,
+    generate_html_report, generate_packet, render_latency_histogram, render_svg_chart,
+    CustosMetrics, LatencyStats, PacketGenParams, PcapWriter, PerformanceHistory, RateMetrics,
+    TrafficProfile,
 };
 use custos_protobuf::ValidationConfig;
 
@@ -49,7 +49,7 @@ struct Args {
     interface: Option<String>,
 
     /// Target packet injection rate (Packets Per Second) for custom profiles
-    #[arg(short, long)]
+    #[arg(long)]
     pps: Option<u64>,
 
     /// Export the simulated traffic to a PCAP file at this path
@@ -71,7 +71,7 @@ struct Args {
     /// Use in-memory simulator target instead of physical interface
     ///
     /// Ideal for measuring pure parser overhead and running on macOS/non-root.
-    #[arg(long, default_value_t = true)]
+    #[arg(long)]
     mock_target: bool,
 
     /// Path to read Custos metrics JSON from in "monitor" mode
@@ -251,7 +251,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Mode::Bench => "BENCHMARK PROFILE RUNNER".to_string(),
         Mode::Monitor => "MONITOR ACTIVE SYSTEM".to_string(),
     };
-    
+
     let active_profile = match args.mode {
         Mode::Bench => format!("{:?}", args.profile),
         Mode::Monitor => "Live System".to_string(),
@@ -310,7 +310,10 @@ async fn run_benchmark_session(
 
     // Generate PCAP if specified
     if let Some(ref pcap_path) = args.pcap_out {
-        println!("Generating PCAP file containing simulated traffic: {}...", pcap_path);
+        println!(
+            "Generating PCAP file containing simulated traffic: {}...",
+            pcap_path
+        );
         generate_pcap_file(pcap_path, args.profile, 50000)?;
         println!("PCAP generation completed successfully.");
     }
@@ -324,9 +327,20 @@ async fn run_benchmark_session(
             TestProfile::Sustained => 500_000,
         },
     };
+    if target_pps == 0 {
+        return Err("--pps must be greater than 0".into());
+    }
 
     println!("Starting traffic generator...");
-    println!("Target rate: {} packets/sec. Target interface: {}", target_pps, args.interface.as_deref().unwrap_or("MOCK"));
+    let target_label = if args.mock_target {
+        "MOCK"
+    } else {
+        args.interface.as_deref().unwrap_or("MOCK")
+    };
+    println!(
+        "Target rate: {} packets/sec. Target interface: {}",
+        target_pps, target_label
+    );
 
     // Set up parsing config
     let config = Arc::new(ValidationConfig::default());
@@ -338,15 +352,18 @@ async fn run_benchmark_session(
         TestProfile::HeavyBurst => 4,
         TestProfile::Sustained => 2,
     };
+    let worker_rate = (target_pps / (num_workers as u64)).max(1);
 
     // Spin up mock validation workers
-    if args.mock_target {
-        println!("Spawning {} in-memory validation parser threads...", num_workers);
+    if args.mock_target || args.interface.is_none() {
+        println!(
+            "Spawning {} in-memory validation parser threads...",
+            num_workers
+        );
         for i in 0..num_workers {
             let counters = atomic_counters.clone();
             let config_clone = config.clone();
             let profile = args.profile;
-            let worker_rate = target_pps / (num_workers as u64);
 
             let handle = std::thread::spawn(move || {
                 run_in_memory_generator_worker(i, counters, config_clone, profile, worker_rate);
@@ -364,10 +381,14 @@ async fn run_benchmark_session(
             for i in 0..num_workers {
                 let counters = atomic_counters.clone();
                 let profile = args.profile;
-                let worker_rate = target_pps / (num_workers as u64);
                 let iface_name = _iface.clone();
                 let handle = std::thread::spawn(move || {
-                    let _ = run_linux_raw_socket_worker(i, &iface_name, counters, profile, worker_rate);
+                    if let Err(e) =
+                        run_linux_raw_socket_worker(i, &iface_name, counters, profile, worker_rate)
+                    {
+                        eprintln!("[Worker {}] raw socket worker failed: {}", i, e);
+                        RUNNING.store(false, Ordering::SeqCst);
+                    }
                 });
                 worker_handles.push(handle);
             }
@@ -379,7 +400,6 @@ async fn run_benchmark_session(
                 let counters = atomic_counters.clone();
                 let config_clone = config.clone();
                 let profile = args.profile;
-                let worker_rate = target_pps / (num_workers as u64);
                 let handle = std::thread::spawn(move || {
                     run_in_memory_generator_worker(i, counters, config_clone, profile, worker_rate);
                 });
@@ -392,7 +412,6 @@ async fn run_benchmark_session(
             let counters = atomic_counters.clone();
             let config_clone = config.clone();
             let profile = args.profile;
-            let worker_rate = target_pps / (num_workers as u64);
             let handle = std::thread::spawn(move || {
                 run_in_memory_generator_worker(i, counters, config_clone, profile, worker_rate);
             });
@@ -404,7 +423,7 @@ async fn run_benchmark_session(
     let state_tui = state.clone();
     let counters_tui = atomic_counters.clone();
     let run_tui = run_flag.clone();
-    
+
     // We run the stats collector loop
     let duration = args.duration;
     let mut last_snap = counters_tui.snapshot();
@@ -428,7 +447,11 @@ async fn run_benchmark_session(
         let mut terminal = if is_tty {
             let mut stdout = io::stdout();
             let _ = crossterm::terminal::enable_raw_mode();
-            let _ = crossterm::execute!(stdout, crossterm::terminal::EnterAlternateScreen, crossterm::cursor::Hide);
+            let _ = crossterm::execute!(
+                stdout,
+                crossterm::terminal::EnterAlternateScreen,
+                crossterm::cursor::Hide
+            );
             let backend = ratatui::backend::CrosstermBackend::new(stdout);
             Some(ratatui::Terminal::new(backend).unwrap())
         } else {
@@ -437,7 +460,7 @@ async fn run_benchmark_session(
 
         while RUNNING.load(Ordering::Relaxed) && run_tui.load(Ordering::Relaxed) {
             tokio::time::sleep(Duration::from_millis(500)).await;
-            
+
             // Refresh CPU & System
             sys.refresh_cpu();
             let cpu_usages: Vec<f32> = sys.cpus().iter().map(|cpu| cpu.cpu_usage()).collect();
@@ -448,12 +471,22 @@ async fn run_benchmark_session(
             let snap = counters_tui.snapshot();
 
             if delta_t > 0.1 {
-                let rx_pps = (snap.rx_packets.saturating_sub(last_snap.rx_packets)) as f64 / delta_t;
-                let tx_pps = (snap.tx_packets.saturating_sub(last_snap.tx_packets)) as f64 / delta_t;
-                let drop_pps = (snap.drop_validation_failed.saturating_sub(last_snap.drop_validation_failed)) as f64 / delta_t;
-                
-                let rx_gbps = ((snap.rx_bytes.saturating_sub(last_snap.rx_bytes)) as f64 * 8.0 / 1_000_000_000.0) / delta_t;
-                let tx_gbps = ((snap.tx_bytes.saturating_sub(last_snap.tx_bytes)) as f64 * 8.0 / 1_000_000_000.0) / delta_t;
+                let rx_pps =
+                    (snap.rx_packets.saturating_sub(last_snap.rx_packets)) as f64 / delta_t;
+                let tx_pps =
+                    (snap.tx_packets.saturating_sub(last_snap.tx_packets)) as f64 / delta_t;
+                let drop_pps = (snap
+                    .drop_validation_failed
+                    .saturating_sub(last_snap.drop_validation_failed))
+                    as f64
+                    / delta_t;
+
+                let rx_gbps = ((snap.rx_bytes.saturating_sub(last_snap.rx_bytes)) as f64 * 8.0
+                    / 1_000_000_000.0)
+                    / delta_t;
+                let tx_gbps = ((snap.tx_bytes.saturating_sub(last_snap.tx_bytes)) as f64 * 8.0
+                    / 1_000_000_000.0)
+                    / delta_t;
 
                 let rate_metrics = RateMetrics {
                     rx_pps,
@@ -470,9 +503,24 @@ async fn run_benchmark_session(
 
                 // Compute Latency Percentiles (simulated based on test profile)
                 let latency_profile = match profile {
-                    TestProfile::Light => LatencyStats { p50_us: 1.2, p90_us: 2.1, p99_us: 4.8, p999_us: 9.5 },
-                    TestProfile::HeavyBurst => LatencyStats { p50_us: 3.8, p90_us: 7.2, p99_us: 15.6, p999_us: 38.4 },
-                    TestProfile::Sustained => LatencyStats { p50_us: 2.1, p90_us: 4.5, p99_us: 8.9, p999_us: 18.2 },
+                    TestProfile::Light => LatencyStats {
+                        p50_us: 1.2,
+                        p90_us: 2.1,
+                        p99_us: 4.8,
+                        p999_us: 9.5,
+                    },
+                    TestProfile::HeavyBurst => LatencyStats {
+                        p50_us: 3.8,
+                        p90_us: 7.2,
+                        p99_us: 15.6,
+                        p999_us: 38.4,
+                    },
+                    TestProfile::Sustained => LatencyStats {
+                        p50_us: 2.1,
+                        p90_us: 4.5,
+                        p99_us: 8.9,
+                        p999_us: 18.2,
+                    },
                 };
 
                 // Update shared state
@@ -480,7 +528,7 @@ async fn run_benchmark_session(
                     *state_tui.metrics.lock().await = snap.clone();
                     *state_tui.rates.lock().await = rate_metrics.clone();
                     *state_tui.latency.lock().await = latency_profile.clone();
-                    
+
                     let mut history = state_tui.history.lock().await;
                     history.push(rx_pps, rx_gbps, drop_pps);
                 }
@@ -554,7 +602,9 @@ async fn run_benchmark_session(
 
     // Render HTML charts using plotters
     let rx_gbps_series_final = rx_gbps_series.lock().unwrap().clone();
-    let time_labels: Vec<String> = (0..rx_gbps_series_final.len()).map(|i| format!("{}s", i)).collect();
+    let time_labels: Vec<String> = (0..rx_gbps_series_final.len())
+        .map(|i| format!("{}s", i))
+        .collect();
     let throughput_svg = match render_svg_chart(
         "Throughput Profile (Gbps)",
         &time_labels,
@@ -575,7 +625,10 @@ async fn run_benchmark_session(
     let json_report = serde_json::to_string_pretty(&final_metrics)?;
     let mut file = File::create(&args.json_out)?;
     file.write_all(json_report.as_bytes())?;
-    println!("Raw JSON performance metrics exported to: {}", args.json_out);
+    println!(
+        "Raw JSON performance metrics exported to: {}",
+        args.json_out
+    );
 
     // Write HTML file report
     let html_report = generate_html_report(
@@ -589,14 +642,20 @@ async fn run_benchmark_session(
     );
     let mut html_file = File::create(&args.report_out)?;
     html_file.write_all(html_report.as_bytes())?;
-    println!("Beautiful printable HTML performance report exported to: {}", args.report_out);
+    println!(
+        "Beautiful printable HTML performance report exported to: {}",
+        args.report_out
+    );
 
     println!("---------------------------------------------------------------");
     println!("  Benchmark Completed Successfully!");
     println!("  Average Packet Rate: {:.2} PPS", final_rates.rx_pps);
     println!("  Average Throughput:  {:.3} Gbps", final_rates.rx_gbps);
     println!("  Total Packets RX:    {}", final_metrics.rx_packets);
-    println!("  Total Drop Actions:  {}", final_metrics.drop_validation_failed);
+    println!(
+        "  Total Drop Actions:  {}",
+        final_metrics.drop_validation_failed
+    );
     println!("---------------------------------------------------------------");
 
     Ok(())
@@ -612,14 +671,20 @@ async fn run_monitor_session(
     run_flag: Arc<AtomicBool>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let metrics_path = std::path::PathBuf::from(&args.metrics_json);
-    println!("Monitoring Custos instance at metrics path: {:?}", metrics_path);
+    println!(
+        "Monitoring Custos instance at metrics path: {:?}",
+        metrics_path
+    );
 
     let mut last_metrics = CustosMetrics::default();
     let mut last_time = Instant::now();
 
     // Check if the file exists
     if !metrics_path.exists() {
-        println!("Warning: Metrics path {:?} does not exist yet. Waiting for Custos to start...", metrics_path);
+        println!(
+            "Warning: Metrics path {:?} does not exist yet. Waiting for Custos to start...",
+            metrics_path
+        );
     }
 
     let mut sys = System::new_all();
@@ -631,7 +696,11 @@ async fn run_monitor_session(
         let mut terminal = if is_tty {
             let mut stdout = io::stdout();
             let _ = crossterm::terminal::enable_raw_mode();
-            let _ = crossterm::execute!(stdout, crossterm::terminal::EnterAlternateScreen, crossterm::cursor::Hide);
+            let _ = crossterm::execute!(
+                stdout,
+                crossterm::terminal::EnterAlternateScreen,
+                crossterm::cursor::Hide
+            );
             let backend = ratatui::backend::CrosstermBackend::new(stdout);
             Some(ratatui::Terminal::new(backend).unwrap())
         } else {
@@ -651,7 +720,7 @@ async fn run_monitor_session(
                         let reader = std::io::BufReader::new(file);
                         serde_json::from_reader(reader).unwrap_or_else(|_| CustosMetrics::default())
                     }
-                    Err(_) => CustosMetrics::default()
+                    Err(_) => CustosMetrics::default(),
                 }
             } else {
                 CustosMetrics::default()
@@ -661,12 +730,32 @@ async fn run_monitor_session(
             let delta_t = now.duration_since(last_time).as_secs_f64();
 
             if delta_t > 0.1 {
-                let rx_pps = (current_metrics.rx_packets.saturating_sub(last_metrics.rx_packets)) as f64 / delta_t;
-                let tx_pps = (current_metrics.tx_packets.saturating_sub(last_metrics.tx_packets)) as f64 / delta_t;
-                let drop_pps = (current_metrics.drop_validation_failed.saturating_sub(last_metrics.drop_validation_failed)) as f64 / delta_t;
+                let rx_pps = (current_metrics
+                    .rx_packets
+                    .saturating_sub(last_metrics.rx_packets)) as f64
+                    / delta_t;
+                let tx_pps = (current_metrics
+                    .tx_packets
+                    .saturating_sub(last_metrics.tx_packets)) as f64
+                    / delta_t;
+                let drop_pps = (current_metrics
+                    .drop_validation_failed
+                    .saturating_sub(last_metrics.drop_validation_failed))
+                    as f64
+                    / delta_t;
 
-                let rx_gbps = ((current_metrics.rx_bytes.saturating_sub(last_metrics.rx_bytes)) as f64 * 8.0 / 1_000_000_000.0) / delta_t;
-                let tx_gbps = ((current_metrics.tx_bytes.saturating_sub(last_metrics.tx_bytes)) as f64 * 8.0 / 1_000_000_000.0) / delta_t;
+                let rx_gbps = ((current_metrics
+                    .rx_bytes
+                    .saturating_sub(last_metrics.rx_bytes)) as f64
+                    * 8.0
+                    / 1_000_000_000.0)
+                    / delta_t;
+                let tx_gbps = ((current_metrics
+                    .tx_bytes
+                    .saturating_sub(last_metrics.tx_bytes)) as f64
+                    * 8.0
+                    / 1_000_000_000.0)
+                    / delta_t;
 
                 let rate_metrics = RateMetrics {
                     rx_pps,
@@ -761,7 +850,6 @@ fn run_in_memory_generator_worker(
     let mut rng = rand::thread_rng();
     let mut params = PacketGenParams::default();
 
-
     let mut last_rate_check = Instant::now();
     let mut local_count = 0;
 
@@ -817,15 +905,19 @@ fn run_in_memory_generator_worker(
         let pkt = generate_packet(&params);
 
         counters.rx_packets.fetch_add(1, Ordering::Relaxed);
-        counters.rx_bytes.fetch_add(pkt.len() as u64, Ordering::Relaxed);
+        counters
+            .rx_bytes
+            .fetch_add(pkt.len() as u64, Ordering::Relaxed);
 
         // Run validation parser directly
         match custos_protobuf::validate_grpc_protobuf_packet(&pkt, &config) {
             Ok(_) => {
                 counters.tx_packets.fetch_add(1, Ordering::Relaxed);
-                counters.tx_bytes.fetch_add(pkt.len() as u64, Ordering::Relaxed);
+                counters
+                    .tx_bytes
+                    .fetch_add(pkt.len() as u64, Ordering::Relaxed);
                 counters.recycled_packets.fetch_add(1, Ordering::Relaxed);
-                
+
                 // Track matching protocol layer milestones
                 counters.ipv4.fetch_add(1, Ordering::Relaxed);
                 counters.tcp.fetch_add(1, Ordering::Relaxed);
@@ -834,31 +926,73 @@ fn run_in_memory_generator_worker(
                 counters.protobuf.fetch_add(1, Ordering::Relaxed);
             }
             Err(e) => {
-                counters.drop_validation_failed.fetch_add(1, Ordering::Relaxed);
+                counters
+                    .drop_validation_failed
+                    .fetch_add(1, Ordering::Relaxed);
                 match e {
                     custos_protobuf::ValidationError::Parse(pe) => match pe {
-                        custos_grpc_basic::ParseError::BufferTooSmall => { counters.too_small.fetch_add(1, Ordering::Relaxed); }
-                        custos_grpc_basic::ParseError::NonIPv4 => { counters.non_ipv4.fetch_add(1, Ordering::Relaxed); }
-                        custos_grpc_basic::ParseError::BadIpHdrLen => { counters.bad_ip_len.fetch_add(1, Ordering::Relaxed); }
-                        custos_grpc_basic::ParseError::NonTCP => { counters.non_tcp.fetch_add(1, Ordering::Relaxed); }
-                        custos_grpc_basic::ParseError::BadIpChecksum => { counters.bad_ip_csum.fetch_add(1, Ordering::Relaxed); }
-                        custos_grpc_basic::ParseError::BadTcpHdrLen => { counters.bad_tcp_len.fetch_add(1, Ordering::Relaxed); }
-                        custos_grpc_basic::ParseError::WrongPort => { counters.wrong_port.fetch_add(1, Ordering::Relaxed); }
-                        custos_grpc_basic::ParseError::BadHttp2Hdr => { counters.bad_http2.fetch_add(1, Ordering::Relaxed); }
-                        custos_grpc_basic::ParseError::NonHttp2Data => { counters.non_http2_data.fetch_add(1, Ordering::Relaxed); }
-                        custos_grpc_basic::ParseError::BadGrpcHdr => { counters.bad_grpc.fetch_add(1, Ordering::Relaxed); }
-                        custos_grpc_basic::ParseError::PayloadOverflow => { counters.l4_overflow.fetch_add(1, Ordering::Relaxed); }
+                        custos_grpc_basic::ParseError::BufferTooSmall => {
+                            counters.too_small.fetch_add(1, Ordering::Relaxed);
+                        }
+                        custos_grpc_basic::ParseError::NonIPv4 => {
+                            counters.non_ipv4.fetch_add(1, Ordering::Relaxed);
+                        }
+                        custos_grpc_basic::ParseError::BadIpHdrLen => {
+                            counters.bad_ip_len.fetch_add(1, Ordering::Relaxed);
+                        }
+                        custos_grpc_basic::ParseError::NonTCP => {
+                            counters.non_tcp.fetch_add(1, Ordering::Relaxed);
+                        }
+                        custos_grpc_basic::ParseError::BadIpChecksum => {
+                            counters.bad_ip_csum.fetch_add(1, Ordering::Relaxed);
+                        }
+                        custos_grpc_basic::ParseError::BadTcpHdrLen => {
+                            counters.bad_tcp_len.fetch_add(1, Ordering::Relaxed);
+                        }
+                        custos_grpc_basic::ParseError::WrongPort => {
+                            counters.wrong_port.fetch_add(1, Ordering::Relaxed);
+                        }
+                        custos_grpc_basic::ParseError::BadHttp2Hdr => {
+                            counters.bad_http2.fetch_add(1, Ordering::Relaxed);
+                        }
+                        custos_grpc_basic::ParseError::NonHttp2Data => {
+                            counters.non_http2_data.fetch_add(1, Ordering::Relaxed);
+                        }
+                        custos_grpc_basic::ParseError::BadGrpcHdr => {
+                            counters.bad_grpc.fetch_add(1, Ordering::Relaxed);
+                        }
+                        custos_grpc_basic::ParseError::PayloadOverflow => {
+                            counters.l4_overflow.fetch_add(1, Ordering::Relaxed);
+                        }
                     },
                     custos_protobuf::ValidationError::Proto(pe) => match pe {
-                        custos_protobuf::ProtoError::InvalidVarint => { counters.invalid_varint.fetch_add(1, Ordering::Relaxed); }
-                        custos_protobuf::ProtoError::InvalidWireType => { counters.invalid_wire_type.fetch_add(1, Ordering::Relaxed); }
-                        custos_protobuf::ProtoError::RecursionLimit => { counters.recursion_limit.fetch_add(1, Ordering::Relaxed); }
-                        custos_protobuf::ProtoError::BufferUnderflow => { counters.buffer_underflow.fetch_add(1, Ordering::Relaxed); }
-                        custos_protobuf::ProtoError::ShapeDimensionLimit => { counters.shape_dim_limit.fetch_add(1, Ordering::Relaxed); }
-                        custos_protobuf::ProtoError::ShapeValueInvalid => { counters.shape_val_invalid.fetch_add(1, Ordering::Relaxed); }
-                        custos_protobuf::ProtoError::TensorSizeLimit => { counters.tensor_size_limit.fetch_add(1, Ordering::Relaxed); }
-                        custos_protobuf::ProtoError::InvalidVarintBytes => { counters.invalid_varint_bytes.fetch_add(1, Ordering::Relaxed); }
-                    }
+                        custos_protobuf::ProtoError::InvalidVarint => {
+                            counters.invalid_varint.fetch_add(1, Ordering::Relaxed);
+                        }
+                        custos_protobuf::ProtoError::InvalidWireType => {
+                            counters.invalid_wire_type.fetch_add(1, Ordering::Relaxed);
+                        }
+                        custos_protobuf::ProtoError::RecursionLimit => {
+                            counters.recursion_limit.fetch_add(1, Ordering::Relaxed);
+                        }
+                        custos_protobuf::ProtoError::BufferUnderflow => {
+                            counters.buffer_underflow.fetch_add(1, Ordering::Relaxed);
+                        }
+                        custos_protobuf::ProtoError::ShapeDimensionLimit => {
+                            counters.shape_dim_limit.fetch_add(1, Ordering::Relaxed);
+                        }
+                        custos_protobuf::ProtoError::ShapeValueInvalid => {
+                            counters.shape_val_invalid.fetch_add(1, Ordering::Relaxed);
+                        }
+                        custos_protobuf::ProtoError::TensorSizeLimit => {
+                            counters.tensor_size_limit.fetch_add(1, Ordering::Relaxed);
+                        }
+                        custos_protobuf::ProtoError::InvalidVarintBytes => {
+                            counters
+                                .invalid_varint_bytes
+                                .fetch_add(1, Ordering::Relaxed);
+                        }
+                    },
                 }
             }
         }
@@ -886,12 +1020,47 @@ fn run_linux_raw_socket_worker(
     profile: TestProfile,
     target_rate: u64,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    use socket2::{Socket, Domain, Type, Protocol};
-    
-    // Bind raw L2 Packet socket on Linux interface
-    let socket = Socket::new(Domain::PACKET, Type::RAW, None)?;
-    // Requires root permissions to bind and write
-    
+    use std::io;
+    use std::mem;
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+
+    let protocol = (libc::ETH_P_ALL as u16).to_be() as i32;
+    // SAFETY: socket is called with constant AF_PACKET/SOCK_RAW parameters and the returned fd is checked before ownership is assumed.
+    let raw_fd = unsafe { libc::socket(libc::AF_PACKET, libc::SOCK_RAW, protocol) };
+    if raw_fd < 0 {
+        return Err(Box::new(io::Error::last_os_error()));
+    }
+    // SAFETY: raw_fd is a valid, newly-created file descriptor from socket and is not owned elsewhere.
+    let socket = unsafe { OwnedFd::from_raw_fd(raw_fd) };
+
+    let iface_cstr = std::ffi::CString::new(iface)?;
+    // SAFETY: iface_cstr is a valid NUL-terminated C string for the duration of the call.
+    let ifindex = unsafe { libc::if_nametoindex(iface_cstr.as_ptr()) };
+    if ifindex == 0 {
+        return Err(Box::new(io::Error::last_os_error()));
+    }
+
+    let addr = libc::sockaddr_ll {
+        sll_family: libc::AF_PACKET as libc::c_ushort,
+        sll_protocol: (libc::ETH_P_ALL as u16).to_be(),
+        sll_ifindex: ifindex as libc::c_int,
+        sll_hatype: 0,
+        sll_pkttype: 0,
+        sll_halen: 0,
+        sll_addr: [0; 8],
+    };
+    // SAFETY: addr points to a fully initialized sockaddr_ll with the requested interface index.
+    let bind_result = unsafe {
+        libc::bind(
+            socket.as_raw_fd(),
+            (&addr as *const libc::sockaddr_ll).cast::<libc::sockaddr>(),
+            mem::size_of::<libc::sockaddr_ll>() as libc::socklen_t,
+        )
+    };
+    if bind_result < 0 {
+        return Err(Box::new(io::Error::last_os_error()));
+    }
+
     let mut rng = rand::thread_rng();
     let mut params = PacketGenParams::default();
     let sleep_duration = Duration::from_nanos(1_000_000_000 / target_rate);
@@ -900,26 +1069,46 @@ fn run_linux_raw_socket_worker(
         let prof = match profile {
             TestProfile::Light => TrafficProfile::ValidPacked,
             TestProfile::HeavyBurst => {
-                if rng.gen_range(0..100) < 80 { TrafficProfile::ValidPacked } else { TrafficProfile::InvalidShapeValue }
+                if rng.gen_range(0..100) < 80 {
+                    TrafficProfile::ValidPacked
+                } else {
+                    TrafficProfile::InvalidShapeValue
+                }
             }
             TestProfile::Sustained => {
-                if rng.gen_range(0..100) < 90 { TrafficProfile::ValidUnpacked } else { TrafficProfile::RecursionLimitExceeded }
+                if rng.gen_range(0..100) < 90 {
+                    TrafficProfile::ValidUnpacked
+                } else {
+                    TrafficProfile::RecursionLimitExceeded
+                }
             }
         };
 
         params.profile = prof;
         let pkt = generate_packet(&params);
 
-        // Send packet via raw socket
-        if let Err(e) = socket.send(&pkt) {
-            // Log once or print error safely
+        // SAFETY: pkt points to a valid initialized byte slice and addr remains valid for the duration of the sendto call.
+        let sent = unsafe {
+            libc::sendto(
+                socket.as_raw_fd(),
+                pkt.as_ptr().cast::<libc::c_void>(),
+                pkt.len(),
+                0,
+                (&addr as *const libc::sockaddr_ll).cast::<libc::sockaddr>(),
+                mem::size_of::<libc::sockaddr_ll>() as libc::socklen_t,
+            )
+        };
+        if sent < 0 {
+            let e = io::Error::last_os_error();
             eprintln!("[Worker {}] raw socket send failed: {}", worker_id, e);
             std::thread::sleep(Duration::from_secs(1));
             continue;
         }
 
         counters.tx_packets.fetch_add(1, Ordering::Relaxed);
-        counters.tx_bytes.fetch_add(pkt.len() as u64, Ordering::Relaxed);
+        counters
+            .tx_bytes
+            .fetch_add(pkt.len() as u64, Ordering::Relaxed);
 
         std::thread::sleep(sleep_duration);
     }
@@ -945,7 +1134,11 @@ fn generate_pcap_file(
     for i in 0..count {
         let prof = match profile {
             TestProfile::Light => {
-                if rng.gen_range(0..100) < 95 { TrafficProfile::ValidPacked } else { TrafficProfile::WrongPort }
+                if rng.gen_range(0..100) < 95 {
+                    TrafficProfile::ValidPacked
+                } else {
+                    TrafficProfile::WrongPort
+                }
             }
             TestProfile::HeavyBurst => {
                 let r = rng.gen_range(0..100);
@@ -960,7 +1153,11 @@ fn generate_pcap_file(
                 }
             }
             TestProfile::Sustained => {
-                if rng.gen_range(0..100) < 90 { TrafficProfile::ValidUnpacked } else { TrafficProfile::ShapeDimLimitExceeded }
+                if rng.gen_range(0..100) < 90 {
+                    TrafficProfile::ValidUnpacked
+                } else {
+                    TrafficProfile::ShapeDimLimitExceeded
+                }
             }
         };
 
@@ -986,16 +1183,16 @@ fn draw_tui_layout(
     state: Arc<SharedState>,
 ) {
     use ratatui::layout::{Constraint, Direction, Layout};
-    use ratatui::widgets::{Block, Borders, Paragraph, Row, Table, Sparkline, Cell};
-    use ratatui::style::{Color, Style, Modifier};
+    use ratatui::style::{Color, Modifier, Style};
+    use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Sparkline, Table};
 
     // 1. Overall screen division: Title header, center body, footer log
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3),  // Header
-            Constraint::Min(10),     // Dashboard body
-            Constraint::Length(3),  // Footer
+            Constraint::Length(3), // Header
+            Constraint::Min(10),   // Dashboard body
+            Constraint::Length(3), // Footer
         ])
         .split(f.size());
 
@@ -1004,7 +1201,11 @@ fn draw_tui_layout(
         " CUSTOS MONITOR & BENCHMARK TOOL  |  Active Profile: [{}]  |  Mode: {}  |  Web: Port {}",
         state.active_profile, state.mode_str, 8080
     ))
-    .block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(Color::Cyan)));
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Cyan)),
+    );
     f.render_widget(header_p, chunks[0]);
 
     // --- Body Blocks split (Left and Right halves) ---
@@ -1020,9 +1221,9 @@ fn draw_tui_layout(
     let left_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(8),  // Rate metrics text cards
-            Constraint::Length(6),  // PPS Sparkline
-            Constraint::Min(4),     // Core CPU Heatmap
+            Constraint::Length(8), // Rate metrics text cards
+            Constraint::Length(6), // PPS Sparkline
+            Constraint::Min(4),    // Core CPU Heatmap
         ])
         .split(body_chunks[0]);
 
@@ -1033,20 +1234,40 @@ fn draw_tui_layout(
           Validation Drops:  {:<12.2} pps    Total Dropped: {}\n\n\
           Latency percentiles:\n\
           p50: {:.2} us  |  p90: {:.2} us  |  p99: {:.2} us  |  p99.9: {:.2} us",
-        rates.rx_pps, rates.rx_gbps,
-        rates.tx_pps, rates.tx_gbps,
-        rates.drop_pps, rates.total_dropped,
-        latency.p50_us, latency.p90_us, latency.p99_us, latency.p999_us
+        rates.rx_pps,
+        rates.rx_gbps,
+        rates.tx_pps,
+        rates.tx_gbps,
+        rates.drop_pps,
+        rates.total_dropped,
+        latency.p50_us,
+        latency.p90_us,
+        latency.p99_us,
+        latency.p999_us
     );
-    let rates_p = Paragraph::new(rates_text)
-        .block(Block::default().title(" Live Core Traffic Performance ").borders(Borders::ALL));
+    let rates_p = Paragraph::new(rates_text).block(
+        Block::default()
+            .title(" Live Core Traffic Performance ")
+            .borders(Borders::ALL),
+    );
     f.render_widget(rates_p, left_chunks[0]);
 
     // Sparkline Graph
     let max_pps = history.rx_pps.iter().cloned().fold(1.0, f64::max);
-    let spark_data: Vec<u64> = history.rx_pps.iter().map(|&x| (x * 100.0 / max_pps) as u64).collect();
+    let spark_data: Vec<u64> = history
+        .rx_pps
+        .iter()
+        .map(|&x| (x * 100.0 / max_pps) as u64)
+        .collect();
     let spark = Sparkline::default()
-        .block(Block::default().title(format!(" Traffic Load History (Peak Rate: {:.1} pps) ", max_pps)).borders(Borders::ALL))
+        .block(
+            Block::default()
+                .title(format!(
+                    " Traffic Load History (Peak Rate: {:.1} pps) ",
+                    max_pps
+                ))
+                .borders(Borders::ALL),
+        )
         .data(&spark_data)
         .style(Style::default().fg(Color::Yellow));
     f.render_widget(spark, left_chunks[1]);
@@ -1063,8 +1284,11 @@ fn draw_tui_layout(
     if num_cpus > 16 {
         cpu_text.push_str("... (other cores omitted in TUI layout)");
     }
-    let cpu_p = Paragraph::new(cpu_text)
-        .block(Block::default().title(" Worker Core CPU Utilization ").borders(Borders::ALL));
+    let cpu_p = Paragraph::new(cpu_text).block(
+        Block::default()
+            .title(" Worker Core CPU Utilization ")
+            .borders(Borders::ALL),
+    );
     f.render_widget(cpu_p, left_chunks[2]);
 
     // --- Right side chunks (Vertical tables) ---
@@ -1078,30 +1302,92 @@ fn draw_tui_layout(
 
     // Protocol Counts table
     let proto_rows = vec![
-        Row::new(vec![Cell::from("IPv4"), Cell::from(metrics.protocol_counts.ipv4.to_string())]),
-        Row::new(vec![Cell::from("TCP"), Cell::from(metrics.protocol_counts.tcp.to_string())]),
-        Row::new(vec![Cell::from("HTTP/2"), Cell::from(metrics.protocol_counts.http2.to_string())]),
-        Row::new(vec![Cell::from("gRPC"), Cell::from(metrics.protocol_counts.grpc.to_string())]),
-        Row::new(vec![Cell::from("Protobuf Shape Match"), Cell::from(metrics.protocol_counts.protobuf.to_string())]),
+        Row::new(vec![
+            Cell::from("IPv4"),
+            Cell::from(metrics.protocol_counts.ipv4.to_string()),
+        ]),
+        Row::new(vec![
+            Cell::from("TCP"),
+            Cell::from(metrics.protocol_counts.tcp.to_string()),
+        ]),
+        Row::new(vec![
+            Cell::from("HTTP/2"),
+            Cell::from(metrics.protocol_counts.http2.to_string()),
+        ]),
+        Row::new(vec![
+            Cell::from("gRPC"),
+            Cell::from(metrics.protocol_counts.grpc.to_string()),
+        ]),
+        Row::new(vec![
+            Cell::from("Protobuf Shape Match"),
+            Cell::from(metrics.protocol_counts.protobuf.to_string()),
+        ]),
     ];
-    let proto_table = Table::new(proto_rows, [Constraint::Percentage(50), Constraint::Percentage(50)])
-        .header(Row::new(vec!["Layer Protocol", "Accumulated Matches"]).style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)))
-        .block(Block::default().title(" Deep Packet Parsing Statistics ").borders(Borders::ALL));
+    let proto_table = Table::new(
+        proto_rows,
+        [Constraint::Percentage(50), Constraint::Percentage(50)],
+    )
+    .header(
+        Row::new(vec!["Layer Protocol", "Accumulated Matches"]).style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+    )
+    .block(
+        Block::default()
+            .title(" Deep Packet Parsing Statistics ")
+            .borders(Borders::ALL),
+    );
     f.render_widget(proto_table, right_chunks[0]);
 
     // Drop Causes Table
     let drop_rows = vec![
-        Row::new(vec![Cell::from("Wrong Target Port"), Cell::from(metrics.parser_failures.wrong_port.to_string())]),
-        Row::new(vec![Cell::from("Bad HTTP/2 Frame"), Cell::from(metrics.parser_failures.bad_http2.to_string())]),
-        Row::new(vec![Cell::from("Bad gRPC Envelope"), Cell::from(metrics.parser_failures.bad_grpc.to_string())]),
-        Row::new(vec![Cell::from("Invalid Varint"), Cell::from(metrics.anomalies.invalid_varint.to_string())]),
-        Row::new(vec![Cell::from("Invalid Wire Type"), Cell::from(metrics.anomalies.invalid_wire_type.to_string())]),
-        Row::new(vec![Cell::from("Shape Value Invalid"), Cell::from(metrics.anomalies.shape_val_invalid.to_string())]),
-        Row::new(vec![Cell::from("Recursion limit Exceeded"), Cell::from(metrics.anomalies.recursion_limit.to_string())]),
+        Row::new(vec![
+            Cell::from("Wrong Target Port"),
+            Cell::from(metrics.parser_failures.wrong_port.to_string()),
+        ]),
+        Row::new(vec![
+            Cell::from("Bad HTTP/2 Frame"),
+            Cell::from(metrics.parser_failures.bad_http2.to_string()),
+        ]),
+        Row::new(vec![
+            Cell::from("Bad gRPC Envelope"),
+            Cell::from(metrics.parser_failures.bad_grpc.to_string()),
+        ]),
+        Row::new(vec![
+            Cell::from("Invalid Varint"),
+            Cell::from(metrics.anomalies.invalid_varint.to_string()),
+        ]),
+        Row::new(vec![
+            Cell::from("Invalid Wire Type"),
+            Cell::from(metrics.anomalies.invalid_wire_type.to_string()),
+        ]),
+        Row::new(vec![
+            Cell::from("Shape Value Invalid"),
+            Cell::from(metrics.anomalies.shape_val_invalid.to_string()),
+        ]),
+        Row::new(vec![
+            Cell::from("Recursion limit Exceeded"),
+            Cell::from(metrics.anomalies.recursion_limit.to_string()),
+        ]),
     ];
-    let drop_table = Table::new(drop_rows, [Constraint::Percentage(60), Constraint::Percentage(40)])
-        .header(Row::new(vec!["Security Drop / Validation Failure Cause", "Total Drops"]).style(Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)))
-        .block(Block::default().title(" Validation Violations & Security Drop Counters ").borders(Borders::ALL));
+    let drop_table = Table::new(
+        drop_rows,
+        [Constraint::Percentage(60), Constraint::Percentage(40)],
+    )
+    .header(
+        Row::new(vec![
+            "Security Drop / Validation Failure Cause",
+            "Total Drops",
+        ])
+        .style(Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+    )
+    .block(
+        Block::default()
+            .title(" Validation Violations & Security Drop Counters ")
+            .borders(Borders::ALL),
+    );
     f.render_widget(drop_table, right_chunks[1]);
 
     // --- Footer block ---
@@ -1113,10 +1399,16 @@ fn draw_tui_layout(
             time_since_start, remaining
         )
     } else {
-        format!(" Monitoring Active Custos Daemon...  Time Connected: {:?}  |  Press Ctrl+C to detach.", time_since_start)
+        format!(
+            " Monitoring Active Custos Daemon...  Time Connected: {:?}  |  Press Ctrl+C to detach.",
+            time_since_start
+        )
     };
-    let footer_p = Paragraph::new(footer_text)
-        .block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(Color::Gray)));
+    let footer_p = Paragraph::new(footer_text).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Gray)),
+    );
     f.render_widget(footer_p, chunks[2]);
 }
 
@@ -1148,7 +1440,7 @@ async fn web_dashboard_handler(
     axum::extract::State(state): axum::extract::State<Arc<SharedState>>,
 ) -> axum::response::Html<String> {
     let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
-    
+
     // Serve beautiful full HTML shell with HTMX script configured to fetch updates
     let html = format!(
         r#"<!DOCTYPE html>
@@ -1211,8 +1503,10 @@ async fn web_dashboard_inner_handler(
     let latency = state.latency.lock().await.clone();
 
     // Render charts
-    let time_labels: Vec<String> = (0..history.rx_gbps.len()).map(|i| format!("-{}s", history.rx_gbps.len() - i)).collect();
-    
+    let time_labels: Vec<String> = (0..history.rx_gbps.len())
+        .map(|i| format!("-{}s", history.rx_gbps.len() - i))
+        .collect();
+
     let throughput_svg = match render_svg_chart(
         "Throughput Profile (Gbps)",
         &time_labels,

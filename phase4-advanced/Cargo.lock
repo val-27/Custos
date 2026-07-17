@@ -425,6 +425,7 @@ dependencies = [
  "custos-common",
  "custos-grpc-basic",
  "custos-protobuf",
+ "libc",
  "plotters",
  "rand",
  "ratatui",
