@@ -8,8 +8,8 @@
 //! - NUMA-node and CPU core affinity alignment.
 //! - Cross-platform simulation and compilation support.
 
-use std::io;
 use std::fs;
+use std::io;
 use std::path::Path;
 
 #[cfg(target_os = "linux")]
@@ -129,18 +129,20 @@ impl TxBatcher {
                 offset += produced;
             } else {
                 if self.tx_q.needs_wakeup() {
-                    self.tx_q.wakeup()?;
+                    if let Err(err) = self.tx_q.wakeup() {
+                        self.buffer.drain(..offset);
+                        return Err(err);
+                    }
                 }
                 // Yield thread execution briefly to allow the driver to clean up descriptors.
                 std::hint::spin_loop();
             }
         }
 
+        self.buffer.clear();
         if self.tx_q.needs_wakeup() {
             self.tx_q.wakeup()?;
         }
-
-        self.buffer.clear();
         Ok(offset)
     }
 
@@ -159,6 +161,7 @@ impl TxBatcher {
 pub struct OptimizedForwarder {
     batcher: TxBatcher,
     reclaim_buffer: Vec<FrameDesc>,
+    pending_reclaim: Vec<FrameDesc>,
 }
 
 impl OptimizedForwarder {
@@ -167,6 +170,7 @@ impl OptimizedForwarder {
         Self {
             batcher: TxBatcher::new(tx_q, batch_size),
             reclaim_buffer: vec![FrameDesc::default(); batch_size],
+            pending_reclaim: Vec::with_capacity(batch_size),
         }
     }
 
@@ -196,26 +200,36 @@ impl OptimizedForwarder {
         umem: &Umem,
         rx_q: &mut RxQueue,
     ) -> Result<usize, io::Error> {
-        // A. Consume reclaimed descriptors from Completion Queue
-        let completed = cq.consume(&mut self.reclaim_buffer[..]);
-        if completed == 0 {
+        if self.pending_reclaim.is_empty() {
+            // A. Consume reclaimed descriptors from Completion Queue
+            let completed = cq.consume(&mut self.reclaim_buffer[..]);
+            if completed == 0 {
+                return Ok(0);
+            }
+
+            // B. Apply CPU prefetch hints to the reclaimed UMEM frame buffers
+            for desc in self.reclaim_buffer.iter().take(completed) {
+                let data = umem.data(desc);
+                let ptr = data.contents().as_ptr();
+                prefetch_cacheline(ptr);
+            }
+
+            self.pending_reclaim
+                .extend_from_slice(&self.reclaim_buffer[..completed]);
+        }
+
+        if self.pending_reclaim.is_empty() {
             return Ok(0);
         }
 
-        // B. Apply CPU prefetch hints to the reclaimed UMEM frame buffers
-        for desc in self.reclaim_buffer.iter().take(completed) {
-            let data = umem.data(desc);
-            let ptr = data.contents().as_ptr();
-            prefetch_cacheline(ptr);
-        }
-
         // C. Produce reclaimed frames back to the RX Fill Queue
-        let mut offset = 0;
-        while offset < completed {
-            let produced = fq.produce(&self.reclaim_buffer[offset..completed]);
+        let mut recycled = 0;
+        while !self.pending_reclaim.is_empty() {
+            let produced = fq.produce(&self.pending_reclaim[..]);
             if produced > 0 {
                 self.batcher.stats.recycled_packets += produced as u64;
-                offset += produced;
+                recycled += produced;
+                self.pending_reclaim.drain(..produced);
             } else {
                 if fq.needs_wakeup() {
                     fq.wakeup(rx_q.fd_mut(), 0)?;
@@ -224,7 +238,7 @@ impl OptimizedForwarder {
             }
         }
 
-        Ok(completed)
+        Ok(recycled)
     }
 
     /// Flushes any pending packets remaining in the TX batch buffer.
@@ -285,8 +299,8 @@ pub fn get_numa_cores(numa_node: i32) -> Result<Vec<usize>, io::Error> {
     Ok(cores)
 }
 
-/// Pins the current thread to the first available CPU core matching the interface's NUMA node.
-pub fn pin_thread_to_numa_node_core(numa_node: i32) -> Result<usize, io::Error> {
+/// Pins the current thread to a CPU core matching the interface's NUMA node.
+pub fn pin_thread_to_numa_node_core(numa_node: i32, preferred_core: usize) -> Result<usize, io::Error> {
     let cores = get_numa_cores(numa_node)?;
     if cores.is_empty() {
         return Err(io::Error::new(
@@ -294,7 +308,11 @@ pub fn pin_thread_to_numa_node_core(numa_node: i32) -> Result<usize, io::Error> 
             "No CPU cores available on target NUMA node",
         ));
     }
-    let target_core = cores[0];
+    let target_core = if cores.contains(&preferred_core) {
+        preferred_core
+    } else {
+        cores[preferred_core % cores.len()]
+    };
     custos_common::pin_thread_to_core(target_core)?;
     Ok(target_core)
 }
