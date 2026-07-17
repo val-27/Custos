@@ -121,7 +121,7 @@ fn validate_shape(shape: &[i64], rule: &ShapeRule) -> Result<(), WalkError> {
         if shape_len > 0 {
             let mut product = 1u64;
             for &dim in shape {
-                product = product.checked_mul(dim as u64).ok_or_else(|| {
+                product = product.checked_mul(dim as u64).ok_or({
                     WalkError::ShapeRuleViolation {
                         field_number: rule.field_number,
                         reason: RuleViolationReason::TensorSizeExceeded {
@@ -212,10 +212,10 @@ fn append_shape_dim(acc: &mut ShapeAccumulator, dim: i64) -> Result<(), WalkErro
     Ok(())
 }
 
-fn shape_accumulator<'a>(
-    accumulators: &'a mut [ShapeAccumulator; 16],
+fn shape_accumulator(
+    accumulators: &mut [ShapeAccumulator; 16],
     field_number: u32,
-) -> Result<&'a mut ShapeAccumulator, WalkError> {
+) -> Result<&mut ShapeAccumulator, WalkError> {
     if let Some(index) = accumulators
         .iter()
         .position(|acc| acc.seen && acc.field_number == field_number)

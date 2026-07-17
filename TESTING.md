@@ -57,26 +57,24 @@ Located within each crate (`phase2-grpc-basic`, `phase3-protobuf`, `phase4-advan
 
 ---
 
-## 3. Test Gap Analysis & Key Improvements
-
-We audited the entire codebase for edge-case vulnerabilities and implemented several high-priority robustness tests to cover potential gaps.
+## 3. Robustness Coverage
 
 ### Gap 1: Stack Exhaustion / Deep Recursion Attacks
 *   **Vulnerability**: Attackers can construct deeply nested length-delimited protobuf fields designed to exceed the thread stack space, triggering a crash (DoS).
 *   **Mitigation**: Custos enforces `max_recursion_depth` on the wire walker.
-*   **Status**: **RESOLVED**. We added `test_deep_recursion_attack` to rules-engine tests. It constructs a payload nested 20 levels deep and asserts that the parser blocks it safely rather than crashing the stack.
+*   **Coverage**: `test_deep_recursion_attack` constructs a payload nested 20 levels deep and asserts that the parser blocks it safely rather than crashing the stack.
 
 ### Gap 2: Malformed Varints & Buffer Boundary Overflows
 *   **Vulnerability**: Redundant leading zero bytes in varints (e.g. over 10 bytes) or unexpected end-of-buffer (EOF) while parsing can crash the parser.
 *   **Mitigation**: Custos parses varints byte-by-byte with strict limit checks.
-*   **Status**: **RESOLVED**. We added `test_malformed_varint_and_buffer_underflow_edge_cases` to rules-engine tests. It tests:
+*   **Coverage**: `test_malformed_varint_and_buffer_underflow_edge_cases` verifies:
     1.  Varints exceeding 10 bytes (standard u64 limit).
     2.  Varints truncated in the middle of a byte sequence.
     3.  Length-delimited fields where length overflows arithmetic bounds.
 
 ### Gap 3: Lock-Free Policy Reloading under High Concurrent Load
 *   **Vulnerability**: Hot-swapping the active policy using `ArcSwap` while packet polling loops are loading pointers concurrently could lead to data races or segfaults if lifetimes are mismanaged.
-*   **Status**: **RESOLVED**. We added `test_concurrent_policy_reload_under_load` to rules-engine tests. It spawns 4 reader threads continuously processing packets while a writer thread reloads new policies 200+ times, verifying zero memory errors or throughput pauses.
+*   **Coverage**: `test_concurrent_policy_reload_under_load` spawns 4 reader threads continuously processing packets while a writer thread reloads new policies 200+ times, verifying zero memory errors or throughput pauses.
 
 ---
 

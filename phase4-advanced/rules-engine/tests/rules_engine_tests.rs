@@ -55,7 +55,7 @@ fn build_mock_packet(
         src_ip,
         dst_ip,
     };
-    let csum = calculate_checksum(&ip.as_bytes());
+    let csum = calculate_checksum(ip.as_bytes());
     ip.hdr_checksum = U16::new(csum);
     buf[14..34].copy_from_slice(ip.as_bytes());
 
@@ -818,17 +818,13 @@ fn test_deep_recursion_attack() {
     })
     .unwrap();
 
-    let packet = build_mock_packet(
-        [192, 168, 1, 1],
-        [192, 168, 1, 2],
-        12345,
-        50051,
-        &payload,
-    );
+    let packet = build_mock_packet([192, 168, 1, 1], [192, 168, 1, 2], 12345, 50051, &payload);
 
     assert_eq!(
         match_packet(&packet, &policy),
-        MatchResult::Block(BlockReason::InvalidProto(custos_protobuf::ProtoError::RecursionLimit))
+        MatchResult::Block(BlockReason::InvalidProto(
+            custos_protobuf::ProtoError::RecursionLimit
+        ))
     );
 }
 
@@ -856,7 +852,13 @@ fn test_concurrent_policy_reload_under_load() {
         let mgr = manager.clone();
         let run = running.clone();
         let handle = thread::spawn(move || {
-            let packet = build_mock_packet([192, 168, 1, 1], [192, 168, 1, 2], 12345, 50051, &[0x08, 0x2A]);
+            let packet = build_mock_packet(
+                [192, 168, 1, 1],
+                [192, 168, 1, 2],
+                12345,
+                50051,
+                &[0x08, 0x2A],
+            );
             while run.load(Ordering::Relaxed) {
                 let policy = mgr.get_policy();
                 let result = match_packet(&packet, &policy);
@@ -928,7 +930,9 @@ fn test_malformed_varint_and_buffer_underflow_edge_cases() {
     );
     assert_eq!(
         match_packet(&packet1, &policy),
-        MatchResult::Block(BlockReason::InvalidProto(custos_protobuf::ProtoError::InvalidVarint))
+        MatchResult::Block(BlockReason::InvalidProto(
+            custos_protobuf::ProtoError::InvalidVarint
+        ))
     );
 
     // Case 2: Buffer finishes in the middle of a varint (unexpected EOF)
@@ -942,7 +946,9 @@ fn test_malformed_varint_and_buffer_underflow_edge_cases() {
     );
     assert_eq!(
         match_packet(&packet2, &policy),
-        MatchResult::Block(BlockReason::InvalidProto(custos_protobuf::ProtoError::BufferUnderflow))
+        MatchResult::Block(BlockReason::InvalidProto(
+            custos_protobuf::ProtoError::BufferUnderflow
+        ))
     );
 
     // Case 3: Tag specifies length-delimited field (wire type 2), but field length causes overflow/underflow.
@@ -956,7 +962,8 @@ fn test_malformed_varint_and_buffer_underflow_edge_cases() {
     );
     assert_eq!(
         match_packet(&packet3, &policy),
-        MatchResult::Block(BlockReason::InvalidProto(custos_protobuf::ProtoError::BufferUnderflow))
+        MatchResult::Block(BlockReason::InvalidProto(
+            custos_protobuf::ProtoError::BufferUnderflow
+        ))
     );
 }
-
