@@ -291,23 +291,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "custos-protobuf"
-version = "0.1.0"
-dependencies = [
- "bytemuck",
- "clap",
- "custos-common",
- "custos-grpc-basic",
- "libc",
- "serde",
- "toml",
- "tracing",
- "tracing-subscriber",
- "xsk-rs",
- "zerocopy",
-]
-
-[[package]]
 name = "custos-rules-engine"
 version = "0.1.0"
 dependencies = [

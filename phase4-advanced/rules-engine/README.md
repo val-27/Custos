@@ -9,6 +9,7 @@ A high-performance, dynamic policy rules engine designed for network security an
 - **Zero-Copy & Zero-Allocation**: Zero heap allocations in the hot path. Walks the packet payload zero-copy using stack-allocated buffers.
 - **Dynamic Tensor Shape Constraints**: Min/max dimensions (rank), max tensor elements, exact shape sets, and bounds on specific dimension indices.
 - **Protobuf Field Allow-lists**: Enforces strict allow-lists of field numbers at the message boundary to block unauthorized metadata.
+- **Speculative Nested Parsing**: Length-delimited fields without shape rules are walked as possible sub-messages. Recursion-limit failures block the packet; other speculative structural or nested-policy failures are treated as bytes/string data and skipped.
 
 ---
 
