@@ -98,7 +98,7 @@ impl Xorshift {
         }
     }
 
-    pub fn next(&mut self) -> u32 {
+    fn next_u32(&mut self) -> u32 {
         let mut x = self.state;
         x ^= x << 13;
         x ^= x >> 17;
@@ -109,7 +109,7 @@ impl Xorshift {
 
     /// Returns a float between 0.0 and 1.0.
     pub fn next_f32(&mut self) -> f32 {
-        (self.next() & 0xffffff) as f32 / 16777216.0
+        (self.next_u32() & 0xffffff) as f32 / 16777216.0
     }
 }
 

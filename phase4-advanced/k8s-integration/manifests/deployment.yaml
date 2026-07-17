@@ -1,0 +1,63 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: custos-worker
+  namespace: custos
+  labels:
+    app: custos-worker
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: custos-worker
+  template:
+    metadata:
+      labels:
+        app: custos-worker
+    spec:
+      nodeSelector:
+        kubernetes.io/os: linux
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: Local
+          localhostProfile: custos-seccomp-profile.json
+      containers:
+      - name: custos-worker
+        image: docker.io/custos/worker:0.1.0
+        imagePullPolicy: IfNotPresent
+        command:
+        - "/usr/local/bin/custos-k8s-worker"
+        args:
+        - "--socket-path"
+        - "/var/run/custos/custos.sock"
+        - "--core"
+        - "1"
+        - "--mode"
+        - "forward"
+        resources:
+          requests:
+            cpu: "1"
+            memory: "512Mi"
+          limits:
+            cpu: "1"
+            memory: "512Mi"
+        securityContext:
+          allowPrivilegeEscalation: false
+          privileged: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+            - ALL
+        volumeMounts:
+        - name: socket-dir
+          mountPath: /var/run/custos
+          readOnly: false # Needs write access to communicate over the UDS stream
+      volumes:
+      - name: socket-dir
+        hostPath:
+          path: /var/run/custos
+          type: Directory

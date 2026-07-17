@@ -238,7 +238,18 @@ dependencies = [
 name = "custos-k8s-integration"
 version = "0.1.0"
 dependencies = [
+ "clap",
+ "custos-common",
+ "custos-grpc-basic",
+ "custos-protobuf",
+ "libc",
+ "libxdp-sys",
+ "serde",
+ "serde_json",
+ "toml",
  "tracing",
+ "tracing-subscriber",
+ "xsk-rs",
 ]
 
 [[package]]

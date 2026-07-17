@@ -6,9 +6,14 @@ This directory holds the production-grade, highly-scalable components of Project
 phase4-advanced/
 ├── Cargo.toml                 # Phase 4 workspace manifest
 ├── README.md                  # Master roadmap & deployment guide (this file)
-├── k8s-integration/           # Kubernetes daemon, eBPF loader, SCM_RIGHTS FD passing
+├── k8s-integration/           # Kubernetes daemon, worker, manifests, SCM_RIGHTS FD passing
 │   ├── Cargo.toml
+│   ├── README.md
+│   ├── manifests/
 │   └── src/
+│       ├── bin/
+│       │   ├── daemon.rs
+│       │   └── worker.rs
 │       └── lib.rs
 ├── multi-queue-sharding/      # Multi-core thread pinning & RSS queue steering
 │   ├── Cargo.toml
@@ -37,8 +42,8 @@ phase4-advanced/
    - **Conventions**: Strict shared-nothing thread architecture; each CPU core runs a dedicated AF_XDP event poll loop on a unique RSS queue.
 2. **`k8s-integration`**:
    - **Purpose**: Handles privilege separation, allowing unprivileged worker containers to validate packet streams in Kubernetes.
-   - **Dependencies**: `tracing`, `nix`.
-   - **Conventions**: Runs a privileged Node Daemonset loader (root) that instantiates eBPF redirect programs and passes AF_XDP socket file descriptors to unprivileged pods over a UNIX domain socket via `SCM_RIGHTS`.
+   - **Dependencies**: See [`k8s-integration/Cargo.toml`](k8s-integration/Cargo.toml).
+   - **Conventions**: Runs a privileged node daemon that passes AF_XDP socket and UMEM file descriptors to unprivileged pods over a UNIX domain socket via `SCM_RIGHTS`; see [`k8s-integration/README.md`](k8s-integration/README.md).
 3. **`rules-engine`**:
    - **Purpose**: High-speed dynamic matching engine for AI inference and shape validation policies.
    - **Dependencies**: See [`rules-engine/Cargo.toml`](rules-engine/Cargo.toml).
@@ -80,31 +85,7 @@ sudo ./target/release/custos-sharded --interface eth0 --queues 0,1,2,3 --cores 2
 
 ### B. Kubernetes Deployment (Secure FD-Passing Flow)
 
-```mermaid
-sequenceDiagram
-    autonumber
-    participant K8s API
-    participant Custos Daemon (Privileged)
-    participant Custos Worker (Unprivileged Pod)
-    participant Kernel (eBPF & NIC)
-
-    K8s API->>Custos Daemon (Privileged): Deploy DaemonSet
-    Custos Daemon (Privileged)->>Kernel (eBPF & NIC): Load eBPF redirect prog, create AF_XDP socket
-    Custos Worker (Unprivileged Pod)->>Custos Daemon (Privileged): Connect to /var/run/custos.sock
-    Custos Daemon (Privileged)->>Custos Worker (Unprivileged Pod): SCM_RIGHTS (Pass socket FD)
-    Custos Worker (Unprivileged Pod)->>Kernel (eBPF & NIC): Mmap UMEM & process packets (Unprivileged)
-```
-
-#### 1. Node Daemonset (Privileged Control Plane)
-- Runs with host privileges.
-- Mounts `/sys/fs/bpf` and `/var/run/custos/` host directories.
-- Binds AF_XDP socket and loads eBPF.
-
-#### 2. Worker Pod (Unprivileged Data Plane)
-- Connects to Daemonset socket `/var/run/custos/fd.sock`.
-- Receives file descriptor using SCM_RIGHTS passing.
-- Performs `mmap` on the shared UMEM buffers.
-- Runs packet parsing safely without root capabilities.
+See [`k8s-integration/README.md`](k8s-integration/README.md) for the authoritative Kubernetes privilege-separation flow, manifests, and run instructions.
 
 ---
 
@@ -128,7 +109,7 @@ Custos exports Prometheus metrics on `http://localhost:9090/metrics` or to `/tmp
 ## Production Hardening Checklist
 
 - [ ] **Thread Isolation**: Isolating CPU cores via `isolcpus` in GRUB parameters to avoid kernel scheduler interruptions.
-- [ ] **Privilege Separation**: Ensured worker pod seccomp profiles restrict root capabilities (`CAP_SYS_ADMIN` dropped, only `CAP_NET_RAW` / `CAP_NET_ADMIN` retained during fd receive).
+- [ ] **Privilege Separation**: Ensured Kubernetes worker pod capabilities and seccomp profile match [`k8s-integration/README.md`](k8s-integration/README.md).
 - [ ] **Memory Protection**: UMEM descriptors bounds checks validated and protected against buffer wrapping.
 - [ ] **Lockless Fast Path**: Confirmed clippy has validated all fast loops have zero locking operations.
 
