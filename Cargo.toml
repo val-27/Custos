@@ -13,9 +13,11 @@ tracing-subscriber = { workspace = true }
 custos-common = { workspace = true }
 
 [dev-dependencies]
-xsk-rs = { workspace = true }
 custos-grpc-basic = { path = "phase2-grpc-basic" }
 custos-protobuf = { path = "phase3-protobuf" }
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+xsk-rs = { workspace = true }
 
 [workspace]
 resolver = "2"

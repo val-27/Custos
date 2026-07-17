@@ -3,23 +3,35 @@
 //! Validates Ethernet, IPv4, TCP, HTTP/2, gRPC, and Protobuf layers zero-copy.
 //! Configures rules via TOML, exports Prometheus/JSON metrics, and runs with zero heap allocations in the hot path.
 
-use clap::Parser;
-use custos_grpc_basic::ParseError;
-use custos_protobuf::{validate_grpc_protobuf_packet, ProtoError, ValidationError, ValidationConfig};
-use std::convert::TryInto;
 use std::error::Error;
+#[cfg(target_os = "linux")]
+use clap::Parser;
+#[cfg(target_os = "linux")]
+use custos_grpc_basic::ParseError;
+#[cfg(target_os = "linux")]
+use custos_protobuf::{validate_grpc_protobuf_packet, ProtoError, ValidationConfig, ValidationError};
+#[cfg(target_os = "linux")]
+use std::convert::TryInto;
+#[cfg(target_os = "linux")]
 use std::fs::File;
+#[cfg(target_os = "linux")]
 use std::io::Write;
+#[cfg(target_os = "linux")]
 use std::num::NonZeroU32;
+#[cfg(target_os = "linux")]
 use std::time::Instant;
+#[cfg(target_os = "linux")]
 use tracing::{debug, error, info, trace, Level};
+#[cfg(target_os = "linux")]
 use tracing_subscriber::FmtSubscriber;
+#[cfg(target_os = "linux")]
 use xsk_rs::{
     config::{BindFlags, Interface, SocketConfig, UmemConfigBuilder},
     CompQueue, FillQueue, FrameDesc, RxQueue, Socket, TxQueue, Umem,
 };
 
 /// CLI Arguments for Phase 3.
+#[cfg(target_os = "linux")]
 #[derive(Parser, Debug)]
 #[command(name = "custos-phase3-protobuf")]
 #[command(about = "Phase 3: AF_XDP Zero-Copy Protobuf Shape Validation Engine", long_about = None)]
@@ -81,6 +93,7 @@ struct Args {
     force_zerocopy: bool,
 }
 
+#[cfg(target_os = "linux")]
 fn main() -> Result<(), Box<dyn Error>> {
     let args = Args::parse();
 
@@ -213,6 +226,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 }
 
 /// The core packet processing loop. Runs with zero heap allocations in the hot path.
+#[cfg(target_os = "linux")]
 fn run_packet_loop(
     args: Args,
     config: ValidationConfig,
@@ -724,4 +738,9 @@ custos_payload_size_bucket{{le="2048"}} {}
             last_stats_time = Instant::now();
         }
     }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn main() -> Result<(), Box<dyn Error>> {
+    Err("AF_XDP packet processing is only supported on Linux".into())
 }

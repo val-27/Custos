@@ -4,37 +4,53 @@
 //! AF_XDP socket, dedicated rings, and isolated UMEM. Communicates dynamically
 //! through an ArcSwap-based policy/configuration reloading and aggregates lock-free stats.
 
+use std::error::Error;
+#[cfg(target_os = "linux")]
 use clap::Parser;
+#[cfg(target_os = "linux")]
 use custos_grpc_basic::ParseError;
+#[cfg(target_os = "linux")]
 use custos_multi_queue_sharding::{
     get_numa_cores, load_config_file, spawn_config_watcher, SharedConfig, ThreadStats,
 };
+#[cfg(target_os = "linux")]
 use custos_protobuf::{
     validate_grpc_protobuf_packet, ProtoError, ValidationConfig, ValidationError,
 };
+#[cfg(target_os = "linux")]
 use nix::sys::signal::{sigaction, SaFlags, SigAction, SigHandler, SigSet, Signal};
+#[cfg(target_os = "linux")]
 use std::convert::TryInto;
-use std::error::Error;
+#[cfg(target_os = "linux")]
 use std::num::NonZeroU32;
+#[cfg(target_os = "linux")]
 use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(target_os = "linux")]
 use std::sync::Arc;
+#[cfg(target_os = "linux")]
 use std::time::Instant;
+#[cfg(target_os = "linux")]
 use tracing::{error, info, Level};
+#[cfg(target_os = "linux")]
 use tracing_subscriber::FmtSubscriber;
+#[cfg(target_os = "linux")]
 use xsk_rs::{
     config::{BindFlags, Interface, SocketConfig, UmemConfigBuilder},
     Socket, Umem,
 };
 
 /// Global shutdown flag updated by SIGINT/SIGTERM signal handlers.
+#[cfg(target_os = "linux")]
 static SHUTDOWN: AtomicBool = AtomicBool::new(false);
 
 /// C-style signal handler for graceful shutdown.
+#[cfg(target_os = "linux")]
 extern "C" fn handle_shutdown_signal(_: libc::c_int) {
     SHUTDOWN.store(true, Ordering::Relaxed);
 }
 
 /// Registers signal actions for SIGINT and SIGTERM.
+#[cfg(target_os = "linux")]
 fn setup_signal_handlers() -> Result<(), nix::Error> {
     let handler = SigHandler::Handler(handle_shutdown_signal);
     let action = SigAction::new(handler, SaFlags::SA_RESTART, SigSet::empty());
@@ -47,6 +63,7 @@ fn setup_signal_handlers() -> Result<(), nix::Error> {
 }
 
 /// Command line arguments for Phase 4 Multi-Queue Sharding daemon.
+#[cfg(target_os = "linux")]
 #[derive(Parser, Debug)]
 #[command(name = "custos-multi-queue-sharding")]
 #[command(about = "Phase 4: AF_XDP Multi-Queue Sharding Engine", long_about = None)]
@@ -92,6 +109,7 @@ struct Args {
     force_zerocopy: bool,
 }
 
+#[cfg(target_os = "linux")]
 fn main() -> Result<(), Box<dyn Error>> {
     let args = Args::parse();
 
@@ -272,6 +290,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 }
 
 /// The worker thread main function. Runs in an infinite polling loop until SHUTDOWN signal.
+#[cfg(target_os = "linux")]
 fn run_worker(
     queue_id: u32,
     core_id: usize,
@@ -390,6 +409,7 @@ fn run_worker(
 }
 
 /// Hot-path packet polling loop. Executed with zero heap allocations on the CPU-pinned thread.
+#[cfg(target_os = "linux")]
 fn run_packet_loop(
     queue_id: u32,
     mode: String,
@@ -723,4 +743,9 @@ fn run_packet_loop(
     }
 
     Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn main() -> Result<(), Box<dyn Error>> {
+    Err("AF_XDP packet processing is only supported on Linux".into())
 }

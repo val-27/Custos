@@ -4,19 +4,27 @@
 //! processes them (either dropping them or swapping MAC addresses for echo),
 //! and submits them to the Tx ring. Employs zero heap allocations in the hot path.
 
-use clap::Parser;
-use std::convert::TryInto;
 use std::error::Error;
+#[cfg(target_os = "linux")]
+use clap::Parser;
+#[cfg(target_os = "linux")]
+use std::convert::TryInto;
+#[cfg(target_os = "linux")]
 use std::num::NonZeroU32;
+#[cfg(target_os = "linux")]
 use std::time::Instant;
+#[cfg(target_os = "linux")]
 use tracing::{debug, error, info, trace, Level};
+#[cfg(target_os = "linux")]
 use tracing_subscriber::FmtSubscriber;
+#[cfg(target_os = "linux")]
 use xsk_rs::{
     config::{BindFlags, Interface, SocketConfig, UmemConfigBuilder},
     CompQueue, FillQueue, FrameDesc, RxQueue, Socket, TxQueue, Umem,
 };
 
 /// Command line arguments for Phase 1 Echo / Forward daemon.
+#[cfg(target_os = "linux")]
 #[derive(Parser, Debug)]
 #[command(name = "custos-phase1-echo")]
 #[command(about = "Phase 1: AF_XDP Single-Core Echo and Forward", long_about = None)]
@@ -54,6 +62,7 @@ struct Args {
     force_zerocopy: bool,
 }
 
+#[cfg(target_os = "linux")]
 fn main() -> Result<(), Box<dyn Error>> {
     let args = Args::parse();
 
@@ -166,6 +175,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 }
 
 /// The core packet processing loop. Runs with zero heap allocations in the hot path.
+#[cfg(target_os = "linux")]
 fn run_packet_loop(
     mode: String,
     verbose: bool,
@@ -385,4 +395,9 @@ fn run_packet_loop(
             last_stats_time = Instant::now();
         }
     }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn main() -> Result<(), Box<dyn Error>> {
+    Err("AF_XDP packet processing is only supported on Linux".into())
 }
