@@ -5,7 +5,7 @@
 //! and submits them to the Tx ring. Employs zero heap allocations in the hot path.
 
 use clap::Parser;
-use std::convert::TryInto;
+use custos_common::OperationMode;
 use std::error::Error;
 use std::num::NonZeroU32;
 use std::time::Instant;
@@ -37,9 +37,9 @@ struct Args {
     #[arg(short, long, default_value_t = 2048)]
     frame_count: u32,
 
-    /// Operation mode: "drop", "forward", or "echo"
-    #[arg(short, long, default_value = "forward")]
-    mode: String,
+    /// Packet processing mode: drop, forward, or echo
+    #[arg(short, long, default_value_t = OperationMode::Forward)]
+    mode: OperationMode,
 
     /// Enable verbose logging (level DEBUG)
     #[arg(short, long)]
@@ -85,12 +85,22 @@ fn main() -> Result<(), Box<dyn Error>> {
         e
     })?;
 
-    // 3. UMEM Configuration (2KB frames, standard ring sizes)
+    // 3. UMEM Configuration (2 KiB frames, ring sizes from shared constants)
+    //
+    // The NonZeroU32 conversions use expect() rather than unwrap() so that a
+    // misconfigured constant produces a descriptive panic message during startup
+    // (not in the hot path). UMEM_FRAME_SIZE and UMEM_RING_SIZE are guaranteed
+    // non-zero by their definitions in custos-common.
+    let frame_size_nz = std::num::NonZeroU32::new(custos_common::UMEM_FRAME_SIZE)
+        .expect("UMEM_FRAME_SIZE must be non-zero");
+    let ring_size_nz = std::num::NonZeroU32::new(custos_common::UMEM_RING_SIZE)
+        .expect("UMEM_RING_SIZE must be non-zero");
+
     let umem_config = UmemConfigBuilder::new()
-        .frame_size(2048.try_into().unwrap())
-        .frame_headroom(0.try_into().unwrap())
-        .fill_queue_size(2048.try_into().unwrap())
-        .comp_queue_size(2048.try_into().unwrap())
+        .frame_size(frame_size_nz)
+        .frame_headroom(0)
+        .fill_queue_size(ring_size_nz)
+        .comp_queue_size(ring_size_nz)
         .build()
         .map_err(|e| {
             error!("Failed to build UmemConfig: {:?}", e);
@@ -166,8 +176,17 @@ fn main() -> Result<(), Box<dyn Error>> {
 }
 
 /// The core packet processing loop. Runs with zero heap allocations in the hot path.
+///
+/// # Purpose
+/// Polls the AF_XDP Rx ring in batches, dispatches each packet according to
+/// `mode` (Drop / Forward / Echo), submits valid packets to the Tx ring, and
+/// recycles completed descriptors back to the Fill ring.
+///
+/// # Performance Rationale
+/// `mode` is stored as an `OperationMode` enum so the per-packet branch is an
+/// integer comparison rather than a heap-allocated string scan.
 fn run_packet_loop(
-    mode: String,
+    mode: OperationMode,
     verbose: bool,
     umem: Umem,
     mut rx_q: RxQueue,
@@ -219,7 +238,7 @@ fn run_packet_loop(
                 debug!("Received batch of {} packets", received);
             }
 
-            if mode == "drop" {
+            if mode == OperationMode::Drop {
                 // Drop mode: Recycle frames directly back into the Fill Queue
                 let mut offset = 0;
                 while offset < received {
@@ -243,7 +262,7 @@ fn run_packet_loop(
                     let len = desc.lengths().data();
                     rx_bytes += len as u64;
 
-                    if mode == "echo" {
+                    if mode == OperationMode::Echo {
                         // Echo: Swap MAC addresses in-place
                         // SAFETY: We have exclusive ownership of the packet frame from the Rx ring.
                         let mut data_mut = unsafe { umem.data_mut(desc) };

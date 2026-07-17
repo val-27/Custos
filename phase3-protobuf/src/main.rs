@@ -4,9 +4,11 @@
 //! Configures rules via TOML, exports Prometheus/JSON metrics, and runs with zero heap allocations in the hot path.
 
 use clap::Parser;
+use custos_common::OperationMode;
 use custos_grpc_basic::ParseError;
-use custos_protobuf::{validate_grpc_protobuf_packet, ProtoError, ValidationError, ValidationConfig};
-use std::convert::TryInto;
+use custos_protobuf::{
+    validate_grpc_protobuf_packet, ProtoError, ValidationConfig, ValidationError,
+};
 use std::error::Error;
 use std::fs::File;
 use std::io::Write;
@@ -40,9 +42,9 @@ struct Args {
     #[arg(short, long, default_value_t = 2048)]
     frame_count: u32,
 
-    /// Operation mode: "forward" (validate & forward) or "echo" (validate & swap MACs)
-    #[arg(short, long, default_value = "forward")]
-    mode: String,
+    /// Packet processing mode: forward or echo
+    #[arg(short, long, default_value_t = OperationMode::Forward)]
+    mode: OperationMode,
 
     /// Config file path (TOML) for validation rules
     #[arg(long)]
@@ -90,9 +92,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     } else {
         Level::INFO
     };
-    let subscriber = FmtSubscriber::builder()
-        .with_max_level(log_level)
-        .finish();
+    let subscriber = FmtSubscriber::builder().with_max_level(log_level).finish();
     tracing::subscriber::set_global_default(subscriber)?;
 
     info!("Starting custos-phase3-protobuf...");
@@ -136,16 +136,29 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     // 3. Interface Resolution
     let if_name: Interface = args.interface.parse().map_err(|e| {
-        error!("Failed to parse interface name '{}': {:?}", args.interface, e);
+        error!(
+            "Failed to parse interface name '{}': {:?}",
+            args.interface, e
+        );
         e
     })?;
 
-    // 4. UMEM Configuration (2KB frames, standard ring sizes)
+    // 4. UMEM Configuration (2 KiB frames, ring sizes from shared constants)
+    //
+    // The NonZeroU32 conversions use expect() rather than unwrap() so that a
+    // misconfigured constant produces a descriptive panic message during startup
+    // (not in the hot path). UMEM_FRAME_SIZE and UMEM_RING_SIZE are guaranteed
+    // non-zero by their definitions in custos-common.
+    let frame_size_nz = std::num::NonZeroU32::new(custos_common::UMEM_FRAME_SIZE)
+        .expect("UMEM_FRAME_SIZE must be non-zero");
+    let ring_size_nz = std::num::NonZeroU32::new(custos_common::UMEM_RING_SIZE)
+        .expect("UMEM_RING_SIZE must be non-zero");
+
     let umem_config = UmemConfigBuilder::new()
-        .frame_size(2048.try_into().unwrap())
-        .frame_headroom(0.try_into().unwrap())
-        .fill_queue_size(2048.try_into().unwrap())
-        .comp_queue_size(2048.try_into().unwrap())
+        .frame_size(frame_size_nz)
+        .frame_headroom(0)
+        .fill_queue_size(ring_size_nz)
+        .comp_queue_size(ring_size_nz)
         .build()
         .map_err(|e| {
             error!("Failed to build UmemConfig: {:?}", e);
@@ -156,16 +169,15 @@ fn main() -> Result<(), Box<dyn Error>> {
     let frame_count_nonzero = NonZeroU32::new(args.frame_count)
         .ok_or("Frame count must be non-zero and a power of two")?;
 
-    let (umem, frame_descs) = Umem::new(
-        umem_config,
-        frame_count_nonzero,
-        use_huge_pages,
-    )
-    .map_err(|e| {
-        error!("Failed to initialize UMEM: {:?}", e);
-        e
-    })?;
-    info!("Initialized UMEM with {} frames (2KB size)", args.frame_count);
+    let (umem, frame_descs) =
+        Umem::new(umem_config, frame_count_nonzero, use_huge_pages).map_err(|e| {
+            error!("Failed to initialize UMEM: {:?}", e);
+            e
+        })?;
+    info!(
+        "Initialized UMEM with {} frames (2KB size)",
+        args.frame_count
+    );
 
     // 5. Socket Configuration
     let mut socket_config_builder = SocketConfig::builder();
@@ -179,20 +191,17 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     let socket_config = socket_config_builder.bind_flags(bind_flags).build();
 
-    let (tx_q, rx_q, fq_and_cq) = unsafe {
-        Socket::new(
-            socket_config,
-            &umem,
-            &if_name,
-            args.queue_id,
-        )
-    }
-    .map_err(|e| {
-        error!("Failed to initialize AF_XDP socket: {:?}", e);
-        e
-    })?;
-    let (mut fq, cq) = fq_and_cq.ok_or("Expected Fill and Completion queues from socket creation")?;
-    info!("Bound AF_XDP socket to interface: {}, queue: {}", args.interface, args.queue_id);
+    let (tx_q, rx_q, fq_and_cq) =
+        unsafe { Socket::new(socket_config, &umem, &if_name, args.queue_id) }.map_err(|e| {
+            error!("Failed to initialize AF_XDP socket: {:?}", e);
+            e
+        })?;
+    let (mut fq, cq) =
+        fq_and_cq.ok_or("Expected Fill and Completion queues from socket creation")?;
+    info!(
+        "Bound AF_XDP socket to interface: {}, queue: {}",
+        args.interface, args.queue_id
+    );
 
     // 6. Populate Fill Queue with all available UMEM frames
     let produced = unsafe { fq.produce(&frame_descs) };
@@ -213,6 +222,15 @@ fn main() -> Result<(), Box<dyn Error>> {
 }
 
 /// The core packet processing loop. Runs with zero heap allocations in the hot path.
+///
+/// # Purpose
+/// Polls the AF_XDP Rx ring in batches, validates each packet through all
+/// layers (L2-L7) via `validate_grpc_protobuf_packet`, dispatches according
+/// to `mode` (Forward / Echo), and recycles invalid frames immediately.
+///
+/// # Performance Rationale
+/// `mode` is stored as an `OperationMode` enum so the per-packet branch is an
+/// integer comparison rather than a heap-allocated string scan.
 fn run_packet_loop(
     args: Args,
     config: ValidationConfig,
@@ -338,7 +356,7 @@ fn run_packet_loop(
                         }
 
                         // Forward packet (or Swap MAC if mode is echo)
-                        if args.mode == "echo" {
+                        if args.mode == OperationMode::Echo {
                             let mut data_mut = unsafe { umem.data_mut(desc) };
                             let contents = data_mut.contents_mut();
                             if contents.len() >= 12 {
@@ -426,11 +444,16 @@ fn run_packet_loop(
                                     ProtoError::ShapeDimensionLimit => anomaly_shape_dim_limit += 1,
                                     ProtoError::ShapeValueInvalid => anomaly_shape_val_invalid += 1,
                                     ProtoError::TensorSizeLimit => anomaly_tensor_size_limit += 1,
-                                    ProtoError::InvalidVarintBytes => anomaly_invalid_varint_bytes += 1,
+                                    ProtoError::InvalidVarintBytes => {
+                                        anomaly_invalid_varint_bytes += 1
+                                    }
                                 }
 
                                 if args.verbose {
-                                    debug!("Protobuf anomaly validation failure (dropped): {:?}", proto_err);
+                                    debug!(
+                                        "Protobuf anomaly validation failure (dropped): {:?}",
+                                        proto_err
+                                    );
                                 }
                             }
                         }
@@ -576,11 +599,40 @@ fn run_packet_loop(
     "1025_2048": {}
   }}
 }}"#,
-                rx_packets, tx_packets, recycled_packets, drop_validation_failed, rx_bytes, tx_bytes,
-                stat_ipv4, stat_tcp, stat_http2_data, stat_grpc, stat_protobuf,
-                err_too_small, err_non_ipv4, err_bad_ip_len, err_non_tcp, err_bad_ip_csum, err_bad_tcp_len, err_wrong_port, err_bad_http2, err_non_http2_data, err_bad_grpc, err_l4_overflow,
-                anomaly_invalid_varint, anomaly_invalid_wire_type, anomaly_recursion_limit, anomaly_buffer_underflow, anomaly_shape_dim_limit, anomaly_shape_val_invalid, anomaly_tensor_size_limit, anomaly_invalid_varint_bytes,
-                hist_payload_0_64, hist_payload_65_256, hist_payload_257_1024, hist_payload_1025_2048
+                rx_packets,
+                tx_packets,
+                recycled_packets,
+                drop_validation_failed,
+                rx_bytes,
+                tx_bytes,
+                stat_ipv4,
+                stat_tcp,
+                stat_http2_data,
+                stat_grpc,
+                stat_protobuf,
+                err_too_small,
+                err_non_ipv4,
+                err_bad_ip_len,
+                err_non_tcp,
+                err_bad_ip_csum,
+                err_bad_tcp_len,
+                err_wrong_port,
+                err_bad_http2,
+                err_non_http2_data,
+                err_bad_grpc,
+                err_l4_overflow,
+                anomaly_invalid_varint,
+                anomaly_invalid_wire_type,
+                anomaly_recursion_limit,
+                anomaly_buffer_underflow,
+                anomaly_shape_dim_limit,
+                anomaly_shape_val_invalid,
+                anomaly_tensor_size_limit,
+                anomaly_invalid_varint_bytes,
+                hist_payload_0_64,
+                hist_payload_65_256,
+                hist_payload_257_1024,
+                hist_payload_1025_2048
             );
 
             if let Ok(mut file) = File::create("/tmp/custos_metrics.json") {
@@ -649,11 +701,39 @@ custos_payload_size_bucket{{le="256"}} {}
 custos_payload_size_bucket{{le="1024"}} {}
 custos_payload_size_bucket{{le="2048"}} {}
 "#,
-                rx_packets, tx_packets, recycled_packets, drop_validation_failed, rx_bytes,
-                stat_ipv4, stat_tcp, stat_http2_data, stat_grpc, stat_protobuf,
-                err_too_small, err_non_ipv4, err_bad_ip_len, err_non_tcp, err_bad_ip_csum, err_bad_tcp_len, err_wrong_port, err_bad_http2, err_non_http2_data, err_bad_grpc, err_l4_overflow,
-                anomaly_invalid_varint, anomaly_invalid_wire_type, anomaly_recursion_limit, anomaly_buffer_underflow, anomaly_shape_dim_limit, anomaly_shape_val_invalid, anomaly_tensor_size_limit, anomaly_invalid_varint_bytes,
-                hist_payload_0_64, hist_payload_65_256, hist_payload_257_1024, hist_payload_1025_2048
+                rx_packets,
+                tx_packets,
+                recycled_packets,
+                drop_validation_failed,
+                rx_bytes,
+                stat_ipv4,
+                stat_tcp,
+                stat_http2_data,
+                stat_grpc,
+                stat_protobuf,
+                err_too_small,
+                err_non_ipv4,
+                err_bad_ip_len,
+                err_non_tcp,
+                err_bad_ip_csum,
+                err_bad_tcp_len,
+                err_wrong_port,
+                err_bad_http2,
+                err_non_http2_data,
+                err_bad_grpc,
+                err_l4_overflow,
+                anomaly_invalid_varint,
+                anomaly_invalid_wire_type,
+                anomaly_recursion_limit,
+                anomaly_buffer_underflow,
+                anomaly_shape_dim_limit,
+                anomaly_shape_val_invalid,
+                anomaly_tensor_size_limit,
+                anomaly_invalid_varint_bytes,
+                hist_payload_0_64,
+                hist_payload_65_256,
+                hist_payload_257_1024,
+                hist_payload_1025_2048
             );
 
             if let Ok(mut file) = File::create("/tmp/custos_metrics.prom") {
