@@ -10,10 +10,10 @@
 //! before allowing them to be forwarded by the AF_XDP processing loops.
 //!
 //! ## Safety Invariants
-//! This library uses safe Rust abstractions. The `PolicyManager` employs `std::sync::RwLock` combined
-//! with `std::sync::Arc` to enable safe configuration swaps without blocking or data races.
-//! Readers in the hot path clone the `Arc` pointer under a brief read lock, meaning the underlying
-//! policy memory remains valid even if a reload occurs concurrently.
+//! This library uses safe Rust abstractions. The `PolicyManager` employs `arc_swap::ArcSwap`
+//! behind `std::sync::Arc` to enable atomic configuration swaps without blocking or data races.
+//! Readers in the hot path clone the active `Arc` pointer, meaning the underlying policy memory
+//! remains valid even if a reload occurs concurrently.
 //!
 //! ## Performance Rationale
 //! 1. **Zero-Copy Parsing**: Leverages the `custos-grpc-basic` and `custos-protobuf` concepts to walk

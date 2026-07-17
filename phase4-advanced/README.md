@@ -38,8 +38,8 @@ phase4-advanced/
    - **Conventions**: Runs a privileged Node Daemonset loader (root) that instantiates eBPF redirect programs and passes AF_XDP socket file descriptors to unprivileged pods over a UNIX domain socket via `SCM_RIGHTS`.
 3. **`rules-engine`**:
    - **Purpose**: High-speed dynamic matching engine for AI inference and shape validation policies.
-   - **Dependencies**: `serde`, `toml`, `tracing`.
-   - **Conventions**: Fast compilation of TOML rules to flat vectors or perfect hashes. Atomically swaps config pointers (e.g. double-buffered pointers) on hot-reload to eliminate synchronization locks in fast paths.
+   - **Dependencies**: See [`rules-engine/Cargo.toml`](rules-engine/Cargo.toml).
+   - **Conventions**: See [`rules-engine/README.md`](rules-engine/README.md) for policy syntax, hot-reload mechanics, and fast-path constraints.
 4. **`tx-optimizations`**:
    - **Purpose**: Throughput optimization of the transmission path.
    - **Dependencies**: `tracing`.

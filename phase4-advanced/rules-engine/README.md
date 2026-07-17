@@ -96,10 +96,10 @@ max = 3
 
 ### Double-Buffering & Atomic Swapping
 
-The `PolicyManager` wraps the policy config in a `std::sync::Arc`. The manager itself contains a `std::sync::RwLock<Arc<DynamicPolicy>>`:
+The `PolicyManager` stores the active policy in `arc_swap::ArcSwap<DynamicPolicy>` behind a shared `std::sync::Arc`:
 
-- **Hot Path**: The packet processing thread fetches a read lock on the `RwLock` and clones the `Arc` pointer. This takes less than a microsecond and has zero contention under active readers.
-- **Reload Path**: The file watcher or control channel updates the policy and swaps the `Arc` pointer under a write lock. The old policy remains allocated in memory for threads actively reading it, and is cleanly deallocated as soon as their references go out of scope.
+- **Hot Path**: The packet processing thread uses `ArcSwap::load_full()` to clone the active `Arc<DynamicPolicy>` without taking a lock.
+- **Reload Path**: The file watcher or control channel stores a new `Arc<DynamicPolicy>` atomically. The old policy remains allocated for threads actively reading it, and is cleanly deallocated as soon as their references go out of scope.
 
 ---
 
