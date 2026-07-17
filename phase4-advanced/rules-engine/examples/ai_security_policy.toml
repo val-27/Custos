@@ -1,0 +1,35 @@
+# AI Inference Security Gateway Policy Configuration
+version = "1.0.0"
+description = "Enforces limits on input tensor dimensions and ranks to prevent adversarial DoS (e.g. huge images/prompts) and limits allowed gRPC fields for inference requests."
+
+# Only allow traffic to Triton/vLLM gRPC ports
+allowed_ports = [50051, 8001]
+
+# Block known malicious IPs / scanner nodes
+blocked_ips = ["192.168.10.25", "10.0.99.1"]
+
+[protobuf_rules]
+max_varint_bytes = 9
+max_recursion_depth = 4
+
+# Strict gRPC Protobuf field allow-list to prevent payload injection of undefined metadata
+# 1: model_name, 2: model_version, 3: inputs, 4: outputs
+field_allow_list = [1, 2, 3, 4]
+
+# Shape constraint rules for input tensors (e.g. field number 3 represents Triton's ModelInferRequest.InferInputTensor)
+[[protobuf_rules.shape_rules]]
+field_number = 3
+min_dimensions = 2
+max_dimensions = 4
+max_tensor_elements = 1048576 # Max 1M elements (e.g. 1x3x512x512 image or 1x1024x1024)
+
+# Restrict Batch Size (index 0) to [1, 8] and Channels (index 1) to exactly 3 for image models
+[[protobuf_rules.shape_rules.dimension_bounds]]
+index = 0
+min = 1
+max = 8
+
+[[protobuf_rules.shape_rules.dimension_bounds]]
+index = 1
+min = 3
+max = 3
