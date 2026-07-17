@@ -1,11 +1,11 @@
 //! Benchmark program to measure before/after performance of AF_XDP TX optimizations.
-//! Runs on both Linux and macOS (via mock).
+//! Runs on non-Linux development hosts using the mock AF_XDP ring path.
 
-use std::time::Instant;
 use custos_tx_optimizations::{
     mock::{CompQueue, FillQueue, FrameDesc, RxQueue, TxQueue, Umem},
     OptimizedForwarder,
 };
+use std::time::Instant;
 
 const TOTAL_PACKETS: u64 = 10_000_000;
 const BATCH_SIZE: usize = 64;
@@ -21,13 +21,21 @@ fn main() {
     // 1. Run Baseline (Unoptimized, batch size = 1, no prefetch)
     println!("Running Baseline Benchmark (Unoptimized)...");
     let (baseline_pps, baseline_duration) = run_baseline();
-    println!("Baseline:  {:.2} Mpps (Duration: {:.2?})", baseline_pps / 1_000_000.0, baseline_duration);
+    println!(
+        "Baseline:  {:.2} Mpps (Duration: {:.2?})",
+        baseline_pps / 1_000_000.0,
+        baseline_duration
+    );
     println!("----------------------------------------------------------");
 
     // 2. Run Optimized (Batch size = 64, with prefetch)
     println!("Running Optimized Benchmark (Batch size = 64 + Prefetch)...");
     let (opt_pps, opt_duration) = run_optimized();
-    println!("Optimized: {:.2} Mpps (Duration: {:.2?})", opt_pps / 1_000_000.0, opt_duration);
+    println!(
+        "Optimized: {:.2} Mpps (Duration: {:.2?})",
+        opt_pps / 1_000_000.0,
+        opt_duration
+    );
     println!("----------------------------------------------------------");
 
     // 3. Print Results Comparison
@@ -115,9 +123,11 @@ fn run_optimized() -> (f64, std::time::Duration) {
         processed += 1;
 
         // Periodically reclaim completed frames in batch
-        if processed % BATCH_SIZE as u64 == 0 {
+        if processed.is_multiple_of(BATCH_SIZE as u64) {
             unsafe {
-                let _ = forwarder.reclaim_completed(&mut cq, &mut fq, &umem, &mut rx_q).unwrap();
+                let _ = forwarder
+                    .reclaim_completed(&mut cq, &mut fq, &umem, &mut rx_q)
+                    .unwrap();
             }
         }
     }
@@ -126,7 +136,9 @@ fn run_optimized() -> (f64, std::time::Duration) {
     unsafe {
         let _ = forwarder.flush().unwrap();
         // Final reclaim to ensure cleanup matches
-        let _ = forwarder.reclaim_completed(&mut cq, &mut fq, &umem, &mut rx_q).unwrap();
+        let _ = forwarder
+            .reclaim_completed(&mut cq, &mut fq, &umem, &mut rx_q)
+            .unwrap();
     }
 
     let duration = start.elapsed();

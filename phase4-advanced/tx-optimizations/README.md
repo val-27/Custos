@@ -78,7 +78,7 @@ Performance Uplift: 1.49x Speedup
 
 ## How to Run the Benchmarks
 
-You can compile and run the benchmark program locally on both macOS and Linux.
+You can compile and run the benchmark program locally on non-Linux development hosts using the mock AF_XDP ring path.
 
 1. Navigate to the `phase4-advanced` directory:
    ```bash

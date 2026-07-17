@@ -123,8 +123,8 @@ fn run_worker_loop(
 
         if received > 0 {
             // B. Zero-copy process and forward
-            for i in 0..received {
-                let mut desc = rx_descs[i];
+            for desc in rx_descs.iter().take(received) {
+                let mut desc = *desc;
                 // In-place payload modification / MAC swap simulation
                 // SAFETY: Exclusive ownership of the received descriptor.
                 unsafe {

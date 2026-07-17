@@ -13,10 +13,10 @@ use std::io;
 use std::path::Path;
 
 #[cfg(target_os = "linux")]
-pub use xsk_rs::{TxQueue, CompQueue, FillQueue, FrameDesc, Umem, RxQueue, Fd};
+pub use xsk_rs::{CompQueue, Fd, FillQueue, FrameDesc, RxQueue, TxQueue, Umem};
 
 #[cfg(not(target_os = "linux"))]
-pub use mock::{TxQueue, CompQueue, FillQueue, FrameDesc, Umem, RxQueue, Fd};
+pub use mock::{CompQueue, Fd, FillQueue, FrameDesc, RxQueue, TxQueue, Umem};
 
 /// Cache-line aligned statistics structure to prevent false sharing
 /// across CPU cores in high-throughput multi-threaded configurations.
@@ -242,6 +242,11 @@ impl OptimizedForwarder {
     }
 
     /// Flushes any pending packets remaining in the TX batch buffer.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure each buffered descriptor is still owned by the batcher and can be
+    /// transferred to the Tx ring.
     pub unsafe fn flush(&mut self) -> Result<usize, io::Error> {
         self.batcher.flush()
     }
@@ -262,7 +267,11 @@ pub fn get_interface_numa_node(interface: &str) -> Option<i32> {
         if let Ok(content) = fs::read_to_string(path) {
             if let Ok(numa_node) = content.trim().parse::<i32>() {
                 // If it returns -1, it means the hardware is UMA or not specified
-                return if numa_node >= 0 { Some(numa_node) } else { None };
+                return if numa_node >= 0 {
+                    Some(numa_node)
+                } else {
+                    None
+                };
             }
         }
     }
@@ -286,7 +295,8 @@ pub fn get_numa_cores(numa_node: i32) -> Result<Vec<usize>, io::Error> {
         if part.contains('-') {
             let mut range = part.split('-');
             if let (Some(start_str), Some(end_str)) = (range.next(), range.next()) {
-                if let (Ok(start), Ok(end)) = (start_str.parse::<usize>(), end_str.parse::<usize>()) {
+                if let (Ok(start), Ok(end)) = (start_str.parse::<usize>(), end_str.parse::<usize>())
+                {
                     for cpu in start..=end {
                         cores.push(cpu);
                     }
@@ -300,7 +310,10 @@ pub fn get_numa_cores(numa_node: i32) -> Result<Vec<usize>, io::Error> {
 }
 
 /// Pins the current thread to a CPU core matching the interface's NUMA node.
-pub fn pin_thread_to_numa_node_core(numa_node: i32, preferred_core: usize) -> Result<usize, io::Error> {
+pub fn pin_thread_to_numa_node_core(
+    numa_node: i32,
+    preferred_core: usize,
+) -> Result<usize, io::Error> {
     let cores = get_numa_cores(numa_node)?;
     if cores.is_empty() {
         return Err(io::Error::new(
@@ -321,7 +334,6 @@ pub fn pin_thread_to_numa_node_core(numa_node: i32, preferred_core: usize) -> Re
 #[cfg(not(target_os = "linux"))]
 pub mod mock {
     use std::cell::UnsafeCell;
-    use std::sync::Arc;
     use std::io;
     use std::sync::Mutex;
 
@@ -364,7 +376,7 @@ pub mod mock {
 
     /// Mock representation of Umem memory pool.
     pub struct Umem {
-        storage: Arc<UnsafeCell<Vec<u8>>>,
+        storage: UnsafeCell<Vec<u8>>,
     }
 
     unsafe impl Send for Umem {}
@@ -373,7 +385,7 @@ pub mod mock {
     impl Umem {
         /// Creates a mock Umem and a pool of frame descriptors.
         pub fn new_mock(size: usize) -> (Self, Vec<FrameDesc>) {
-            let storage = Arc::new(UnsafeCell::new(vec![0u8; size]));
+            let storage = UnsafeCell::new(vec![0u8; size]);
             let mut descs = Vec::new();
             for i in 0..(size / 2048) {
                 descs.push(FrameDesc {
@@ -385,6 +397,10 @@ pub mod mock {
         }
 
         /// Returns read-only access to a mock descriptor's packet memory.
+        ///
+        /// # Safety
+        ///
+        /// The descriptor address and length must describe a frame fully contained in this UMEM.
         pub unsafe fn data(&self, desc: &FrameDesc) -> UmemData<'_> {
             let ptr = self.storage.get();
             let slice = std::slice::from_raw_parts(ptr as *const u8, (*ptr).len());
@@ -395,6 +411,11 @@ pub mod mock {
         }
 
         /// Returns read-write access to a mock descriptor's packet memory.
+        ///
+        /// # Safety
+        ///
+        /// The descriptor address and length must describe a frame fully contained in this UMEM,
+        /// and no other references to the same frame may exist while the mutable slice is live.
         pub unsafe fn data_mut(&self, desc: &mut FrameDesc) -> UmemDataMut<'_> {
             let ptr = self.storage.get();
             let slice = std::slice::from_raw_parts_mut(ptr as *mut u8, (*ptr).len());
@@ -435,6 +456,12 @@ pub mod mock {
     /// Mock TxQueue ring.
     pub struct TxQueue {}
 
+    impl Default for TxQueue {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
     impl TxQueue {
         /// Creates a new TxQueue.
         pub fn new() -> Self {
@@ -442,6 +469,11 @@ pub mod mock {
         }
 
         /// Inserts descriptors to the mock transmission ring.
+        ///
+        /// # Safety
+        ///
+        /// The caller must transfer ownership of the descriptors to the mock transmit ring until
+        /// they are consumed from the completion queue.
         pub unsafe fn produce(&mut self, descs: &[FrameDesc]) -> usize {
             let mut lock = TX_IN_FLIGHT.lock().unwrap();
             lock.extend_from_slice(descs);
@@ -462,6 +494,12 @@ pub mod mock {
     /// Mock Completion Queue ring.
     pub struct CompQueue {}
 
+    impl Default for CompQueue {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
     impl CompQueue {
         /// Creates a new CompQueue.
         pub fn new() -> Self {
@@ -469,11 +507,16 @@ pub mod mock {
         }
 
         /// Consumes completed descriptors from the virtual kernel ring.
+        ///
+        /// # Safety
+        ///
+        /// The destination slice must be valid for writes, and the caller must reclaim ownership
+        /// only for the number of descriptors returned.
         pub unsafe fn consume(&mut self, descs: &mut [FrameDesc]) -> usize {
             let mut lock = TX_IN_FLIGHT.lock().unwrap();
             let to_consume = std::cmp::min(descs.len(), lock.len());
-            for i in 0..to_consume {
-                descs[i] = lock.remove(0);
+            for desc in descs.iter_mut().take(to_consume) {
+                *desc = lock.remove(0);
             }
             to_consume
         }
@@ -482,6 +525,12 @@ pub mod mock {
     /// Mock Fill Queue ring.
     pub struct FillQueue {}
 
+    impl Default for FillQueue {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
     impl FillQueue {
         /// Creates a new FillQueue.
         pub fn new() -> Self {
@@ -489,6 +538,11 @@ pub mod mock {
         }
 
         /// Returns descriptors to the receive ring.
+        ///
+        /// # Safety
+        ///
+        /// The caller must ensure the descriptors are no longer owned by the Tx or completion
+        /// paths before recycling them to the fill ring.
         pub unsafe fn produce(&mut self, descs: &[FrameDesc]) -> usize {
             descs.len()
         }
@@ -509,6 +563,12 @@ pub mod mock {
         fd: Fd,
     }
 
+    impl Default for RxQueue {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
     impl RxQueue {
         /// Creates a new RxQueue.
         pub fn new() -> Self {
@@ -516,6 +576,11 @@ pub mod mock {
         }
 
         /// Receives descriptors.
+        ///
+        /// # Safety
+        ///
+        /// The destination slice must be valid for writes, and the caller must treat returned
+        /// descriptors as exclusively owned by the receive path.
         pub unsafe fn consume(&mut self, _descs: &mut [FrameDesc]) -> usize {
             0
         }
@@ -528,5 +593,4 @@ pub mod mock {
 
     /// Mock File Descriptor.
     pub struct Fd {}
-
 }
