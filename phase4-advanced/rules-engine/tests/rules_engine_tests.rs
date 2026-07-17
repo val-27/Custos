@@ -434,6 +434,88 @@ fn test_tensor_size_constraints() {
             limit: 10000
         })
     );
+
+    let payload_interleaved_bad = vec![0x0A, 0x02, 0xE8, 0x07, 0x10, 0x01, 0x0A, 0x02, 0xE8, 0x07];
+    let packet_interleaved_bad = build_mock_packet(
+        [192, 168, 1, 1],
+        [192, 168, 1, 2],
+        12345,
+        50051,
+        &payload_interleaved_bad,
+    );
+    assert_eq!(
+        match_packet(&packet_interleaved_bad, &policy),
+        MatchResult::Block(BlockReason::TensorSizeLimitExceeded {
+            field: 1,
+            got: 1000000,
+            limit: 10000
+        })
+    );
+}
+
+#[test]
+fn test_length_delimited_bounds_use_checked_add() {
+    let policy = DynamicPolicy::try_from(Policy {
+        version: "1.0.0".to_string(),
+        description: None,
+        allowed_ports: None,
+        blocked_ips: None,
+        protobuf_rules: Some(ProtobufRules {
+            max_varint_bytes: Some(10),
+            max_recursion_depth: None,
+            field_allow_list: None,
+            shape_rules: Some(vec![ShapeRule {
+                field_number: 1,
+                min_dimensions: None,
+                max_dimensions: None,
+                max_tensor_elements: None,
+                exact_shapes: None,
+                dimension_bounds: None,
+            }]),
+        }),
+    })
+    .unwrap();
+
+    let payload = vec![
+        0x0A, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x01,
+    ];
+    let packet = build_mock_packet([192, 168, 1, 1], [192, 168, 1, 2], 12345, 50051, &payload);
+
+    assert_eq!(
+        match_packet(&packet, &policy),
+        MatchResult::Block(BlockReason::InvalidProto(
+            custos_protobuf::ProtoError::BufferUnderflow
+        ))
+    );
+}
+
+#[test]
+fn test_speculative_bytes_do_not_enforce_shape_rules() {
+    let policy = DynamicPolicy::try_from(Policy {
+        version: "1.0.0".to_string(),
+        description: None,
+        allowed_ports: None,
+        blocked_ips: None,
+        protobuf_rules: Some(ProtobufRules {
+            max_varint_bytes: None,
+            max_recursion_depth: None,
+            field_allow_list: None,
+            shape_rules: Some(vec![ShapeRule {
+                field_number: 1,
+                min_dimensions: Some(2),
+                max_dimensions: None,
+                max_tensor_elements: None,
+                exact_shapes: None,
+                dimension_bounds: None,
+            }]),
+        }),
+    })
+    .unwrap();
+
+    let payload = vec![0x12, 0x02, 0x08, 0x01];
+    let packet = build_mock_packet([192, 168, 1, 1], [192, 168, 1, 2], 12345, 50051, &payload);
+
+    assert_eq!(match_packet(&packet, &policy), MatchResult::Allow);
 }
 
 #[test]

@@ -23,8 +23,8 @@ fn calculate_checksum(data: &[u8]) -> u16 {
 }
 
 fn build_mock_packet(src_ip: [u8; 4], dst_ip: [u8; 4]) -> Vec<u8> {
-    use zerocopy::AsBytes;
     use zerocopy::byteorder::network_endian::{U16, U32};
+    use zerocopy::AsBytes;
 
     let mut buf = vec![0u8; 68];
 
@@ -130,11 +130,14 @@ fn main() {
     let pkt_from_h2 = build_mock_packet([10, 0, 0, 2], [192, 168, 1, 2]); // Allowed under v1
 
     println!("\n--- Phase 1: Evaluating with Policy v1.0.0 ---");
-    
+
     // Evaluate h1
     let res_h1 = match_packet(&pkt_from_h1, &manager.get_policy());
     println!("[Traffic-Loop] Packet from 10.0.0.1: {:?}", res_h1);
-    assert!(matches!(res_h1, MatchResult::Block(BlockReason::BlockedIP(_))));
+    assert!(matches!(
+        res_h1,
+        MatchResult::Block(BlockReason::BlockedIP(_))
+    ));
 
     // Evaluate h2
     let res_h2 = match_packet(&pkt_from_h2, &manager.get_policy());
@@ -154,7 +157,10 @@ fn main() {
     std::thread::sleep(Duration::from_millis(250));
 
     println!("\n--- Phase 2: Evaluating with Policy v2.0.0 (Hot-Reloaded) ---");
-    println!("[Demo] Active Policy Version: {}", manager.get_policy().version);
+    println!(
+        "[Demo] Active Policy Version: {}",
+        manager.get_policy().version
+    );
     assert_eq!(manager.get_policy().version, "2.0.0");
 
     // Evaluate h1 (should now be ALLOWED)
@@ -165,7 +171,10 @@ fn main() {
     // Evaluate h2 (should now be BLOCKED)
     let res_h2_v2 = match_packet(&pkt_from_h2, &manager.get_policy());
     println!("[Traffic-Loop] Packet from 10.0.0.2: {:?}", res_h2_v2);
-    assert!(matches!(res_h2_v2, MatchResult::Block(BlockReason::BlockedIP(_))));
+    assert!(matches!(
+        res_h2_v2,
+        MatchResult::Block(BlockReason::BlockedIP(_))
+    ));
 
     // 6. Cleanup
     let _ = std::fs::remove_file(temp_policy_path);

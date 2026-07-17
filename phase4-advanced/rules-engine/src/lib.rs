@@ -23,15 +23,15 @@
 //! 3. **O(1) Policy Lookups**: The policy rules are preprocessed into `HashSet` and `HashMap` structures
 //!    during loading/reloading, ensuring that port, IP, and shape checks are evaluated in constant time.
 
-pub mod policy;
 pub mod engine;
 pub mod manager;
+pub mod policy;
 
-pub use policy::{
-    validate_policy, DimensionBound, DynamicPolicy, Policy, ProtobufRules, ShapeRule,
-};
 pub use engine::{
     match_packet, walk_message_with_policy, BlockReason, MatchResult, RuleViolationReason,
     WalkError,
 };
 pub use manager::{load_policy_from_file, PolicyManager};
+pub use policy::{
+    validate_policy, DimensionBound, DynamicPolicy, Policy, ProtobufRules, ShapeRule,
+};

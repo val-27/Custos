@@ -1,6 +1,6 @@
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::net::Ipv4Addr;
-use serde::{Deserialize, Serialize};
 
 /// Serializable representation of the configuration policy.
 /// Used for parsing TOML or JSON config files.
@@ -76,7 +76,7 @@ pub fn validate_policy(policy: &Policy) -> Result<(), String> {
     if policy.version.trim().is_empty() {
         return Err("Policy version cannot be empty".to_string());
     }
-    
+
     if let Some(ref proto) = policy.protobuf_rules {
         if let Some(max_varint) = proto.max_varint_bytes {
             if max_varint == 0 || max_varint > 10 {
@@ -135,7 +135,7 @@ pub fn validate_policy(policy: &Policy) -> Result<(), String> {
             }
         }
     }
-    
+
     Ok(())
 }
 
@@ -156,7 +156,7 @@ impl TryFrom<Policy> for DynamicPolicy {
 
     fn try_from(p: Policy) -> Result<Self, Self::Error> {
         validate_policy(&p)?;
-        
+
         let mut shape_rules_map = HashMap::new();
         let mut max_varint_bytes = 9;
         let mut max_recursion_depth = 3;

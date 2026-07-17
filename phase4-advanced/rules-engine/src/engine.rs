@@ -192,6 +192,48 @@ fn validate_shape(shape: &[i64], rule: &ShapeRule) -> Result<(), WalkError> {
     Ok(())
 }
 
+#[derive(Clone, Copy)]
+struct ShapeAccumulator {
+    field_number: u32,
+    shape: [i64; 16],
+    len: usize,
+    seen: bool,
+}
+
+fn append_shape_dim(acc: &mut ShapeAccumulator, dim: i64) -> Result<(), WalkError> {
+    if acc.len >= acc.shape.len() {
+        return Err(WalkError::Proto(ProtoError::ShapeDimensionLimit));
+    }
+    if dim <= 0 {
+        return Err(WalkError::Proto(ProtoError::ShapeValueInvalid));
+    }
+    acc.shape[acc.len] = dim;
+    acc.len += 1;
+    Ok(())
+}
+
+fn shape_accumulator<'a>(
+    accumulators: &'a mut [ShapeAccumulator; 16],
+    field_number: u32,
+) -> Result<&'a mut ShapeAccumulator, WalkError> {
+    if let Some(index) = accumulators
+        .iter()
+        .position(|acc| acc.seen && acc.field_number == field_number)
+    {
+        return Ok(&mut accumulators[index]);
+    }
+
+    if let Some(index) = accumulators.iter().position(|acc| !acc.seen) {
+        let acc = &mut accumulators[index];
+        acc.field_number = field_number;
+        acc.len = 0;
+        acc.seen = true;
+        return Ok(acc);
+    }
+
+    Err(WalkError::Proto(ProtoError::ShapeDimensionLimit))
+}
+
 /// Recursively walks a Protobuf message, enforcing allow-lists and evaluating shape constraints.
 pub fn walk_message_with_policy(
     buf: &[u8],
@@ -206,6 +248,13 @@ pub fn walk_message_with_policy(
     if end_offset > buf.len() {
         return Err(WalkError::Proto(ProtoError::BufferUnderflow));
     }
+
+    let mut shape_accumulators = [ShapeAccumulator {
+        field_number: 0,
+        shape: [0; 16],
+        len: 0,
+        seen: false,
+    }; 16];
 
     while *offset < end_offset {
         let tag = read_varint(&buf[..end_offset], offset, policy.max_varint_bytes)
@@ -224,75 +273,42 @@ pub fn walk_message_with_policy(
         }
 
         // Evaluate shape rules if a rule exists for this field
-        if let Some(rule) = policy.shape_rules.get(&field_number) {
-            let mut shape = [0i64; 16];
-            let mut shape_len = 0;
-            let mut current_wire_type = wire_type;
+        if policy.shape_rules.contains_key(&field_number) {
+            let acc = shape_accumulator(&mut shape_accumulators, field_number)?;
 
-            loop {
-                if current_wire_type == 2 {
-                    let len = read_varint(&buf[..end_offset], offset, policy.max_varint_bytes)
-                        .map_err(WalkError::Proto)? as usize;
-                    if *offset + len > end_offset {
-                        return Err(WalkError::Proto(ProtoError::BufferUnderflow));
-                    }
-                    let pack_end = *offset + len;
-                    while *offset < pack_end {
-                        let dim = read_varint(&buf[..pack_end], offset, policy.max_varint_bytes)
-                            .map_err(WalkError::Proto)? as i64;
-                        if shape_len >= shape.len() {
-                            return Err(WalkError::Proto(ProtoError::ShapeDimensionLimit));
-                        }
-                        if dim <= 0 {
-                            return Err(WalkError::Proto(ProtoError::ShapeValueInvalid));
-                        }
-                        shape[shape_len] = dim;
-                        shape_len += 1;
-                    }
-                } else if current_wire_type == 0 {
-                    let dim = read_varint(&buf[..end_offset], offset, policy.max_varint_bytes)
+            if wire_type == 2 {
+                let len = read_varint(&buf[..end_offset], offset, policy.max_varint_bytes)
+                    .map_err(WalkError::Proto)? as usize;
+                let Some(pack_end) = (*offset).checked_add(len) else {
+                    return Err(WalkError::Proto(ProtoError::BufferUnderflow));
+                };
+                if pack_end > end_offset {
+                    return Err(WalkError::Proto(ProtoError::BufferUnderflow));
+                }
+                while *offset < pack_end {
+                    let dim = read_varint(&buf[..pack_end], offset, policy.max_varint_bytes)
                         .map_err(WalkError::Proto)? as i64;
-                    if shape_len >= shape.len() {
-                        return Err(WalkError::Proto(ProtoError::ShapeDimensionLimit));
-                    }
-                    if dim <= 0 {
-                        return Err(WalkError::Proto(ProtoError::ShapeValueInvalid));
-                    }
-                    shape[shape_len] = dim;
-                    shape_len += 1;
-                } else {
-                    return Err(WalkError::Proto(ProtoError::InvalidWireType));
+                    append_shape_dim(acc, dim)?;
                 }
-
-                let next_offset = *offset;
-                if next_offset >= end_offset {
-                    break;
-                }
-                let next_tag = read_varint(&buf[..end_offset], offset, policy.max_varint_bytes)
-                    .map_err(WalkError::Proto)?;
-                let next_field_number = (next_tag >> 3) as u32;
-                let next_wire_type = (next_tag & 0x07) as u8;
-                if next_field_number != field_number {
-                    *offset = next_offset;
-                    break;
-                }
-                if next_wire_type != 0 && next_wire_type != 2 {
-                    return Err(WalkError::Proto(ProtoError::InvalidWireType));
-                }
-                current_wire_type = next_wire_type;
+            } else if wire_type == 0 {
+                let dim = read_varint(&buf[..end_offset], offset, policy.max_varint_bytes)
+                    .map_err(WalkError::Proto)? as i64;
+                append_shape_dim(acc, dim)?;
+            } else {
+                return Err(WalkError::Proto(ProtoError::InvalidWireType));
             }
-
-            validate_shape(&shape[..shape_len], rule)?;
         } else {
             // No shape rule matches.
             // Speculatively walk inside wire type 2 as a sub-message.
             if wire_type == 2 {
                 let len = read_varint(&buf[..end_offset], offset, policy.max_varint_bytes)
                     .map_err(WalkError::Proto)? as usize;
-                if *offset + len > end_offset {
+                let Some(sub_end) = (*offset).checked_add(len) else {
+                    return Err(WalkError::Proto(ProtoError::BufferUnderflow));
+                };
+                if sub_end > end_offset {
                     return Err(WalkError::Proto(ProtoError::BufferUnderflow));
                 }
-                let sub_end = *offset + len;
                 let mut sub_offset = *offset;
 
                 // Attempt to recursively parse.
@@ -301,9 +317,6 @@ pub fn walk_message_with_policy(
                         *offset = sub_end;
                     }
                     Err(err @ WalkError::DisallowedField(_)) => {
-                        return Err(err);
-                    }
-                    Err(err @ WalkError::ShapeRuleViolation { .. }) => {
                         return Err(err);
                     }
                     Err(_) => {
@@ -323,6 +336,14 @@ pub fn walk_message_with_policy(
             }
         }
     }
+
+    for acc in shape_accumulators.iter().filter(|acc| acc.seen) {
+        let Some(rule) = policy.shape_rules.get(&acc.field_number) else {
+            return Err(WalkError::Proto(ProtoError::InvalidWireType));
+        };
+        validate_shape(&acc.shape[..acc.len], rule)?;
+    }
+
     Ok(())
 }
 
