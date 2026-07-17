@@ -246,6 +246,7 @@ name = "custos-multi-queue-sharding"
 version = "0.1.0"
 dependencies = [
  "custos-common",
+ "custos-tx-optimizations",
  "tracing",
 ]
 
@@ -285,7 +286,10 @@ dependencies = [
 name = "custos-tx-optimizations"
 version = "0.1.0"
 dependencies = [
+ "custos-common",
+ "libc",
  "tracing",
+ "xsk-rs",
 ]
 
 [[package]]

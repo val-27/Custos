@@ -20,7 +20,10 @@ phase4-advanced/
 │       └── lib.rs
 └── tx-optimizations/          # Batching, prefetching, and NUMA-aligned transmit paths
     ├── Cargo.toml
+    ├── README.md
     └── src/
+        ├── bin/
+        │   └── bench_tx.rs
         └── lib.rs
 ```
 
@@ -30,7 +33,7 @@ phase4-advanced/
 
 1. **`multi-queue-sharding`**:
    - **Purpose**: Leverages multi-queue NICs and RSS (Receive Side Scaling) to scale packet processing horizontally.
-   - **Dependencies**: `custos-common` (for core affinity/thread pinning), `tracing`.
+   - **Dependencies**: `custos-common` (for core affinity/thread pinning), `custos-tx-optimizations`, `tracing`.
    - **Conventions**: Strict shared-nothing thread architecture; each CPU core runs a dedicated AF_XDP event poll loop on a unique RSS queue.
 2. **`k8s-integration`**:
    - **Purpose**: Handles privilege separation, allowing unprivileged worker containers to validate packet streams in Kubernetes.
@@ -42,8 +45,8 @@ phase4-advanced/
    - **Conventions**: See [`rules-engine/README.md`](rules-engine/README.md) for policy syntax, hot-reload mechanics, and fast-path constraints.
 4. **`tx-optimizations`**:
    - **Purpose**: Throughput optimization of the transmission path.
-   - **Dependencies**: `tracing`.
-   - **Conventions**: Batching of TX submissions, pipeline prefetching (`_mm_prefetch`) of UMEM descriptors, and NUMA-node memory alignment.
+   - **Dependencies**: `custos-common`, `libc`, `tracing`, and `xsk-rs` on Linux.
+   - **Conventions**: Batching of TX submissions, platform-specific prefetching of UMEM descriptors, NUMA-node core affinity, and a mock benchmark path for non-Linux development. See `tx-optimizations/README.md` for benchmark usage.
 
 ---
 
