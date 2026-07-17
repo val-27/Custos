@@ -1,0 +1,44 @@
+{
+  "rx_packets": 17000,
+  "tx_packets": 16660,
+  "recycled_packets": 16660,
+  "drop_validation_failed": 340,
+  "rx_bytes": 1292000,
+  "tx_bytes": 1266160,
+  "protocol_counts": {
+    "ipv4": 16660,
+    "tcp": 16660,
+    "http2": 16660,
+    "grpc": 16660,
+    "protobuf": 16660
+  },
+  "parser_failures": {
+    "too_small": 0,
+    "non_ipv4": 0,
+    "bad_ip_len": 0,
+    "non_tcp": 0,
+    "bad_ip_csum": 0,
+    "bad_tcp_len": 0,
+    "wrong_port": 340,
+    "bad_http2": 0,
+    "non_http2_data": 0,
+    "bad_grpc": 0,
+    "l4_overflow": 0
+  },
+  "anomalies": {
+    "invalid_varint": 0,
+    "invalid_wire_type": 0,
+    "recursion_limit": 0,
+    "buffer_underflow": 0,
+    "shape_dim_limit": 0,
+    "shape_val_invalid": 0,
+    "tensor_size_limit": 0,
+    "invalid_varint_bytes": 0
+  },
+  "payload_size_histogram": {
+    "0_64": 0,
+    "65_256": 0,
+    "257_1024": 0,
+    "1025_2048": 0
+  }
+}
