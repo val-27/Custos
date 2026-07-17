@@ -265,7 +265,7 @@ fn test_shape_dimension_bounds() {
     );
 
     // 3. Packed Shape [1, 3, 224, 224, 224] -> 5 dimensions (Too large)
-    let payload_too_large = vec![0x0A, 0x07, 0x01, 0x03, 0xE0, 0x01, 0xE0, 0x01, 0xE0, 0x01];
+    let payload_too_large = vec![0x0A, 0x08, 0x01, 0x03, 0xE0, 0x01, 0xE0, 0x01, 0xE0, 0x01];
     let packet_too_large = build_mock_packet(
         [192, 168, 1, 1],
         [192, 168, 1, 2],
