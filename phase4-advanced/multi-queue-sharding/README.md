@@ -37,7 +37,7 @@ graph TD
     subgraph Control Plane
         Watcher[TOML Config Watcher <br> File Mod Time Watcher]:::config
         ArcS[ArcSwap <br> Lock-Free Atomic Swap]:::config
-        Metrics[Metrics Aggregator <br> Periodic Summation & JSON Export]:::config
+        Metrics[Metrics Aggregator <br> JSON & Prometheus Export]:::config
     end
 
     %% Flow
@@ -59,7 +59,8 @@ graph TD
     T1 -.->|Thread-Local Counters| Metrics
     TN -.->|Thread-Local Counters| Metrics
     
-    Metrics -->|Exports /tmp/custos_metrics.json| JSON[(JSON File)]:::nic
+    Metrics -->|Writes /tmp/custos_metrics.json| JSON[(JSON File)]:::nic
+    Metrics -->|Serves /metrics| Prom[(Prometheus)]:::nic
 ```
 
 ### Core Architecture Principles
@@ -68,7 +69,7 @@ graph TD
 2. **Dedicated Sockets and Isolated UMEMs**: Each worker thread instantiates its own dedicated AF_XDP socket, ring buffers (`Rx`, `Tx`, `Fill`, `Completion`), and its own isolated UMEM memory slice, preventing cache contention and eliminating cross-core memory operations.
 3. **NUMA Awareness**: CPU cores are automatically selected from the same NUMA node as the network interface card (NIC), minimizing interconnect latency (QPI/UPI) and maximizing PCIe bus performance.
 4. **Lock-Free Configuration Swapping**: Config reloads (validation rules) are swapped atomically using `ArcSwap`. Worker threads load the config reference once per polling batch using relaxed atomic loads, guaranteeing zero contention.
-5. **Cache-Aligned Lock-Free Metrics**: Statistics are updated in thread-local, cache-line-aligned (64 bytes) counters, preventing false sharing (cache-line bouncing) between processors. The main thread aggregates these values periodically using lock-free atomic reads.
+5. **Cache-Aligned Lock-Free Metrics**: Statistics are updated in thread-local, cache-line-aligned (64 bytes) counters, preventing false sharing (cache-line bouncing) between processors. The main thread keeps the legacy JSON snapshot current, and the Prometheus exporter reads atomic snapshots from an isolated background thread; see [`../docs/prometheus-grafana.md`](../../docs/prometheus-grafana.md) for metrics setup.
 
 ---
 
@@ -96,6 +97,9 @@ Options:
   -v, --verbose                    Enable verbose logging (level DEBUG)
       --force-copy                 Force copy-mode (XDP_COPY)
       --force-zerocopy             Force zero-copy mode (XDP_ZEROCOPY)
+      --metrics                    Enable Prometheus HTTP metrics endpoint (/metrics) [default: true]
+      --no-metrics                 Disable Prometheus HTTP metrics endpoint
+      --metrics-port <PORT>        Port for Prometheus HTTP metrics endpoint [default: 9090]
   -h, --help                       Print help
 ```
 

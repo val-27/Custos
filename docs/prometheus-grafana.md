@@ -114,4 +114,4 @@ Services in the stack:
 - **Prometheus UI**: `http://localhost:9091`
 - **Grafana Dashboard**: `http://localhost:3000` (User: `admin`, Password: `admin`)
 
-The Grafana instance automatically loads the pre-configured Prometheus data source and imports [`deploy/grafana/dashboard.json`](file:///Users/jpvalent/.treehouse/Custos-1475d5/1/Custos/deploy/grafana/dashboard.json).
+The Grafana instance automatically loads the pre-configured Prometheus data source and imports [`deploy/grafana/dashboard.json`](../deploy/grafana/dashboard.json).

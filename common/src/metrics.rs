@@ -735,6 +735,8 @@ pub fn start_metrics_server(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{Read, Write};
+    use std::net::TcpStream;
 
     #[test]
     fn test_thread_stats_recording() {
@@ -783,5 +785,60 @@ mod tests {
         assert!(
             metrics_text.contains("custos_processing_latency_seconds_bucket{le=\"0.000001\"} 1")
         );
+    }
+
+    #[test]
+    fn test_metrics_server_http_endpoint() {
+        let stats = Arc::new(ThreadStats::default());
+        stats.rx_packets.store(42, Ordering::Relaxed);
+        stats.tx_packets.store(40, Ordering::Relaxed);
+        stats.drop_validation_failed.store(2, Ordering::Relaxed);
+        stats.stat_grpc.store(38, Ordering::Relaxed);
+        stats.record_payload_size(128);
+        stats.record_latency_ns(900);
+
+        let reserved = TcpListener::bind("127.0.0.1:0").expect("reserve ephemeral metrics port");
+        let port = reserved
+            .local_addr()
+            .expect("read reserved metrics port")
+            .port();
+        drop(reserved);
+
+        let handle = start_metrics_server(
+            MetricsConfig {
+                enabled: true,
+                port,
+            },
+            vec![stats],
+        )
+        .expect("start metrics server")
+        .expect("metrics server enabled");
+
+        let response = (0..50)
+            .find_map(|_| {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+                let mut stream = TcpStream::connect(("127.0.0.1", handle.port)).ok()?;
+                stream
+                    .write_all(
+                        b"GET /metrics HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
+                    )
+                    .ok()?;
+                let mut response = String::new();
+                stream.read_to_string(&mut response).ok()?;
+                Some(response)
+            })
+            .expect("scrape metrics endpoint");
+
+        assert!(response.starts_with("HTTP/1.1 200 OK"));
+        assert!(response.contains("content-type: text/plain; version=0.0.4; charset=utf-8"));
+        assert!(response.contains("custos_up 1"));
+        assert!(response.contains("custos_rx_packets_total 42"));
+        assert!(response.contains("custos_tx_packets_total 40"));
+        assert!(response.contains("custos_dropped_packets_total{reason=\"validation_failed\"} 2"));
+        assert!(response.contains("custos_protocol_packets_total{protocol=\"grpc\"} 38"));
+
+        if let Ok(path) = std::env::var("CUSTOS_METRICS_EVIDENCE") {
+            std::fs::write(path, response).expect("write metrics evidence");
+        }
     }
 }

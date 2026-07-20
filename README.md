@@ -15,9 +15,14 @@ Project Custos is a high-performance, user-space network security appliance buil
 
 ## Build and Run
 
-To compile the workspace:
+To compile the base workspace:
 ```bash
 cargo build --release
+```
+
+To compile the Phase 4 multi-queue sharding daemon:
+```bash
+cargo build --release --manifest-path phase4-advanced/Cargo.toml --target-dir target
 ```
 
 To run Phase 4 multi-queue sharding daemon with Prometheus metrics enabled (`http://localhost:9090/metrics`):
