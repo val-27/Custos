@@ -25,6 +25,7 @@ When running `custos-multi-queue-sharding` (or other Custos daemons):
 ```
 
 - `--metrics`: Enables the Prometheus HTTP server (default: `true`).
+- `--no-metrics`: Disables the Prometheus HTTP server.
 - `--metrics-port <PORT>`: Specifies HTTP listening port (default: `9090`).
 
 ### Endpoint Verification
@@ -110,7 +111,7 @@ docker-compose up -d
 
 Services in the stack:
 - **Custos Appliance**: `http://localhost:9090/metrics`
-- **Prometheus UI**: `http://localhost:9090`
+- **Prometheus UI**: `http://localhost:9091`
 - **Grafana Dashboard**: `http://localhost:3000` (User: `admin`, Password: `admin`)
 
 The Grafana instance automatically loads the pre-configured Prometheus data source and imports [`deploy/grafana/dashboard.json`](file:///Users/jpvalent/.treehouse/Custos-1475d5/1/Custos/deploy/grafana/dashboard.json).

@@ -12,12 +12,9 @@
 //! 3. The Prometheus HTTP endpoint runs on an isolated background thread with a minimal
 //!    `axum` async web server. It only reads atomic snapshots when scraped by Prometheus.
 
-use axum::{
-    http::header::CONTENT_TYPE,
-    routing::get,
-    Router,
-};
+use axum::{http::header::CONTENT_TYPE, routing::get, Router};
 use std::net::SocketAddr;
+use std::net::TcpListener;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
@@ -257,10 +254,7 @@ pub struct MetricsServerHandle {
 /// Converts atomic snapshots into standard Prometheus metric types (counters, gauges,
 /// histograms) with clear labels for per-core breakdown, protocols, parser error reasons,
 /// and Protobuf anomaly categories.
-pub fn render_prometheus_metrics(
-    stats_list: &[Arc<ThreadStats>],
-    start_time: Instant,
-) -> String {
+pub fn render_prometheus_metrics(stats_list: &[Arc<ThreadStats>], start_time: Instant) -> String {
     let mut rx_packets_total = 0u64;
     let mut rx_bytes_total = 0u64;
     let mut tx_packets_total = 0u64;
@@ -393,7 +387,11 @@ pub fn render_prometheus_metrics(
     }
 
     let elapsed_secs = start_time.elapsed().as_secs_f64();
-    let uptime = if elapsed_secs > 0.0 { elapsed_secs } else { 0.001 };
+    let uptime = if elapsed_secs > 0.0 {
+        elapsed_secs
+    } else {
+        0.001
+    };
     let rx_pps = rx_packets_total as f64 / uptime;
     let tx_pps = tx_packets_total as f64 / uptime;
     let rx_bps = rx_bytes_total as f64 / uptime;
@@ -442,13 +440,21 @@ pub fn render_prometheus_metrics(
     out.push_str("# TYPE custos_tx_bytes_total counter\n");
     out.push_str(&format!("custos_tx_bytes_total {}\n\n", tx_bytes_total));
 
-    out.push_str("# HELP custos_recycled_packets_total Total frames recycled back to UMEM fill ring.\n");
+    out.push_str(
+        "# HELP custos_recycled_packets_total Total frames recycled back to UMEM fill ring.\n",
+    );
     out.push_str("# TYPE custos_recycled_packets_total counter\n");
-    out.push_str(&format!("custos_recycled_packets_total {}\n\n", recycled_packets_total));
+    out.push_str(&format!(
+        "custos_recycled_packets_total {}\n\n",
+        recycled_packets_total
+    ));
 
     out.push_str("# HELP custos_dropped_packets_total Total dropped packets by drop reason.\n");
     out.push_str("# TYPE custos_dropped_packets_total counter\n");
-    out.push_str(&format!("custos_dropped_packets_total{{reason=\"validation_failed\"}} {}\n\n", drop_validation_failed_total));
+    out.push_str(&format!(
+        "custos_dropped_packets_total{{reason=\"validation_failed\"}} {}\n\n",
+        drop_validation_failed_total
+    ));
 
     out.push_str("# HELP custos_core_rx_packets_total Received packets per CPU core.\n");
     out.push_str("# TYPE custos_core_rx_packets_total counter\n");
@@ -465,57 +471,171 @@ pub fn render_prometheus_metrics(
 
     out.push_str("# HELP custos_protocol_packets_total Total packets inspected by protocol.\n");
     out.push_str("# TYPE custos_protocol_packets_total counter\n");
-    out.push_str(&format!("custos_protocol_packets_total{{protocol=\"ipv4\"}} {}\n", stat_ipv4));
-    out.push_str(&format!("custos_protocol_packets_total{{protocol=\"tcp\"}} {}\n", stat_tcp));
-    out.push_str(&format!("custos_protocol_packets_total{{protocol=\"http2\"}} {}\n", stat_http2_data));
-    out.push_str(&format!("custos_protocol_packets_total{{protocol=\"grpc\"}} {}\n", stat_grpc));
-    out.push_str(&format!("custos_protocol_packets_total{{protocol=\"protobuf\"}} {}\n\n", stat_protobuf));
+    out.push_str(&format!(
+        "custos_protocol_packets_total{{protocol=\"ipv4\"}} {}\n",
+        stat_ipv4
+    ));
+    out.push_str(&format!(
+        "custos_protocol_packets_total{{protocol=\"tcp\"}} {}\n",
+        stat_tcp
+    ));
+    out.push_str(&format!(
+        "custos_protocol_packets_total{{protocol=\"http2\"}} {}\n",
+        stat_http2_data
+    ));
+    out.push_str(&format!(
+        "custos_protocol_packets_total{{protocol=\"grpc\"}} {}\n",
+        stat_grpc
+    ));
+    out.push_str(&format!(
+        "custos_protocol_packets_total{{protocol=\"protobuf\"}} {}\n\n",
+        stat_protobuf
+    ));
 
     out.push_str("# HELP custos_parser_errors_total Total L2-L5 parser errors by reason.\n");
     out.push_str("# TYPE custos_parser_errors_total counter\n");
-    out.push_str(&format!("custos_parser_errors_total{{reason=\"too_small\"}} {}\n", err_too_small));
-    out.push_str(&format!("custos_parser_errors_total{{reason=\"non_ipv4\"}} {}\n", err_non_ipv4));
-    out.push_str(&format!("custos_parser_errors_total{{reason=\"bad_ip_len\"}} {}\n", err_bad_ip_len));
-    out.push_str(&format!("custos_parser_errors_total{{reason=\"non_tcp\"}} {}\n", err_non_tcp));
-    out.push_str(&format!("custos_parser_errors_total{{reason=\"bad_ip_csum\"}} {}\n", err_bad_ip_csum));
-    out.push_str(&format!("custos_parser_errors_total{{reason=\"bad_tcp_len\"}} {}\n", err_bad_tcp_len));
-    out.push_str(&format!("custos_parser_errors_total{{reason=\"wrong_port\"}} {}\n", err_wrong_port));
-    out.push_str(&format!("custos_parser_errors_total{{reason=\"bad_http2\"}} {}\n", err_bad_http2));
-    out.push_str(&format!("custos_parser_errors_total{{reason=\"non_http2_data\"}} {}\n", err_non_http2_data));
-    out.push_str(&format!("custos_parser_errors_total{{reason=\"bad_grpc\"}} {}\n", err_bad_grpc));
-    out.push_str(&format!("custos_parser_errors_total{{reason=\"l4_overflow\"}} {}\n\n", err_l4_overflow));
+    out.push_str(&format!(
+        "custos_parser_errors_total{{reason=\"too_small\"}} {}\n",
+        err_too_small
+    ));
+    out.push_str(&format!(
+        "custos_parser_errors_total{{reason=\"non_ipv4\"}} {}\n",
+        err_non_ipv4
+    ));
+    out.push_str(&format!(
+        "custos_parser_errors_total{{reason=\"bad_ip_len\"}} {}\n",
+        err_bad_ip_len
+    ));
+    out.push_str(&format!(
+        "custos_parser_errors_total{{reason=\"non_tcp\"}} {}\n",
+        err_non_tcp
+    ));
+    out.push_str(&format!(
+        "custos_parser_errors_total{{reason=\"bad_ip_csum\"}} {}\n",
+        err_bad_ip_csum
+    ));
+    out.push_str(&format!(
+        "custos_parser_errors_total{{reason=\"bad_tcp_len\"}} {}\n",
+        err_bad_tcp_len
+    ));
+    out.push_str(&format!(
+        "custos_parser_errors_total{{reason=\"wrong_port\"}} {}\n",
+        err_wrong_port
+    ));
+    out.push_str(&format!(
+        "custos_parser_errors_total{{reason=\"bad_http2\"}} {}\n",
+        err_bad_http2
+    ));
+    out.push_str(&format!(
+        "custos_parser_errors_total{{reason=\"non_http2_data\"}} {}\n",
+        err_non_http2_data
+    ));
+    out.push_str(&format!(
+        "custos_parser_errors_total{{reason=\"bad_grpc\"}} {}\n",
+        err_bad_grpc
+    ));
+    out.push_str(&format!(
+        "custos_parser_errors_total{{reason=\"l4_overflow\"}} {}\n\n",
+        err_l4_overflow
+    ));
 
     out.push_str("# HELP custos_anomalies_total Total Protobuf wire-format anomalies by type.\n");
     out.push_str("# TYPE custos_anomalies_total counter\n");
-    out.push_str(&format!("custos_anomalies_total{{type=\"invalid_varint\"}} {}\n", anomaly_invalid_varint));
-    out.push_str(&format!("custos_anomalies_total{{type=\"invalid_wire_type\"}} {}\n", anomaly_invalid_wire_type));
-    out.push_str(&format!("custos_anomalies_total{{type=\"recursion_limit\"}} {}\n", anomaly_recursion_limit));
-    out.push_str(&format!("custos_anomalies_total{{type=\"buffer_underflow\"}} {}\n", anomaly_buffer_underflow));
-    out.push_str(&format!("custos_anomalies_total{{type=\"shape_dim_limit\"}} {}\n", anomaly_shape_dim_limit));
-    out.push_str(&format!("custos_anomalies_total{{type=\"shape_val_invalid\"}} {}\n", anomaly_shape_val_invalid));
-    out.push_str(&format!("custos_anomalies_total{{type=\"tensor_size_limit\"}} {}\n", anomaly_tensor_size_limit));
-    out.push_str(&format!("custos_anomalies_total{{type=\"invalid_varint_bytes\"}} {}\n\n", anomaly_invalid_varint_bytes));
+    out.push_str(&format!(
+        "custos_anomalies_total{{type=\"invalid_varint\"}} {}\n",
+        anomaly_invalid_varint
+    ));
+    out.push_str(&format!(
+        "custos_anomalies_total{{type=\"invalid_wire_type\"}} {}\n",
+        anomaly_invalid_wire_type
+    ));
+    out.push_str(&format!(
+        "custos_anomalies_total{{type=\"recursion_limit\"}} {}\n",
+        anomaly_recursion_limit
+    ));
+    out.push_str(&format!(
+        "custos_anomalies_total{{type=\"buffer_underflow\"}} {}\n",
+        anomaly_buffer_underflow
+    ));
+    out.push_str(&format!(
+        "custos_anomalies_total{{type=\"shape_dim_limit\"}} {}\n",
+        anomaly_shape_dim_limit
+    ));
+    out.push_str(&format!(
+        "custos_anomalies_total{{type=\"shape_val_invalid\"}} {}\n",
+        anomaly_shape_val_invalid
+    ));
+    out.push_str(&format!(
+        "custos_anomalies_total{{type=\"tensor_size_limit\"}} {}\n",
+        anomaly_tensor_size_limit
+    ));
+    out.push_str(&format!(
+        "custos_anomalies_total{{type=\"invalid_varint_bytes\"}} {}\n\n",
+        anomaly_invalid_varint_bytes
+    ));
 
     out.push_str("# HELP custos_payload_bytes Payload size histogram in bytes.\n");
     out.push_str("# TYPE custos_payload_bytes histogram\n");
-    out.push_str(&format!("custos_payload_bytes_bucket{{le=\"64\"}} {}\n", cum_p64));
-    out.push_str(&format!("custos_payload_bytes_bucket{{le=\"256\"}} {}\n", cum_p256));
-    out.push_str(&format!("custos_payload_bytes_bucket{{le=\"1024\"}} {}\n", cum_p1024));
-    out.push_str(&format!("custos_payload_bytes_bucket{{le=\"2048\"}} {}\n", cum_p2048));
-    out.push_str(&format!("custos_payload_bytes_bucket{{le=\"+Inf\"}} {}\n", cum_p_inf));
+    out.push_str(&format!(
+        "custos_payload_bytes_bucket{{le=\"64\"}} {}\n",
+        cum_p64
+    ));
+    out.push_str(&format!(
+        "custos_payload_bytes_bucket{{le=\"256\"}} {}\n",
+        cum_p256
+    ));
+    out.push_str(&format!(
+        "custos_payload_bytes_bucket{{le=\"1024\"}} {}\n",
+        cum_p1024
+    ));
+    out.push_str(&format!(
+        "custos_payload_bytes_bucket{{le=\"2048\"}} {}\n",
+        cum_p2048
+    ));
+    out.push_str(&format!(
+        "custos_payload_bytes_bucket{{le=\"+Inf\"}} {}\n",
+        cum_p_inf
+    ));
     out.push_str(&format!("custos_payload_bytes_count {}\n\n", cum_p_inf));
 
     out.push_str("# HELP custos_processing_latency_seconds Packet processing latency histogram in seconds.\n");
     out.push_str("# TYPE custos_processing_latency_seconds histogram\n");
-    out.push_str(&format!("custos_processing_latency_seconds_bucket{{le=\"0.0000001\"}} {}\n", cum_l100ns));
-    out.push_str(&format!("custos_processing_latency_seconds_bucket{{le=\"0.0000005\"}} {}\n", cum_l500ns));
-    out.push_str(&format!("custos_processing_latency_seconds_bucket{{le=\"0.000001\"}} {}\n", cum_l1us));
-    out.push_str(&format!("custos_processing_latency_seconds_bucket{{le=\"0.000005\"}} {}\n", cum_l5us));
-    out.push_str(&format!("custos_processing_latency_seconds_bucket{{le=\"0.00001\"}} {}\n", cum_l10us));
-    out.push_str(&format!("custos_processing_latency_seconds_bucket{{le=\"0.00005\"}} {}\n", cum_l50us));
-    out.push_str(&format!("custos_processing_latency_seconds_bucket{{le=\"+Inf\"}} {}\n", cum_linf));
-    out.push_str(&format!("custos_processing_latency_seconds_sum {:.9}\n", latency_sum_seconds));
-    out.push_str(&format!("custos_processing_latency_seconds_count {}\n\n", lat_count));
+    out.push_str(&format!(
+        "custos_processing_latency_seconds_bucket{{le=\"0.0000001\"}} {}\n",
+        cum_l100ns
+    ));
+    out.push_str(&format!(
+        "custos_processing_latency_seconds_bucket{{le=\"0.0000005\"}} {}\n",
+        cum_l500ns
+    ));
+    out.push_str(&format!(
+        "custos_processing_latency_seconds_bucket{{le=\"0.000001\"}} {}\n",
+        cum_l1us
+    ));
+    out.push_str(&format!(
+        "custos_processing_latency_seconds_bucket{{le=\"0.000005\"}} {}\n",
+        cum_l5us
+    ));
+    out.push_str(&format!(
+        "custos_processing_latency_seconds_bucket{{le=\"0.00001\"}} {}\n",
+        cum_l10us
+    ));
+    out.push_str(&format!(
+        "custos_processing_latency_seconds_bucket{{le=\"0.00005\"}} {}\n",
+        cum_l50us
+    ));
+    out.push_str(&format!(
+        "custos_processing_latency_seconds_bucket{{le=\"+Inf\"}} {}\n",
+        cum_linf
+    ));
+    out.push_str(&format!(
+        "custos_processing_latency_seconds_sum {:.9}\n",
+        latency_sum_seconds
+    ));
+    out.push_str(&format!(
+        "custos_processing_latency_seconds_count {}\n\n",
+        lat_count
+    ));
 
     out.push_str("# HELP custos_rx_pps Calculated RX rate in packets per second.\n");
     out.push_str("# TYPE custos_rx_pps gauge\n");
@@ -538,37 +658,32 @@ pub fn render_prometheus_metrics(
 
 /// Starts the Prometheus HTTP metrics exporter on a dedicated background thread.
 ///
-/// If `config.enabled` is `false`, this function immediately returns `None` without
-/// launching any network thread or allocating resources.
+/// If `config.enabled` is `false`, this function immediately returns without launching
+/// any network thread or allocating resources.
 ///
 /// When enabled, spawns an isolated thread with a single-threaded Tokio runtime running an
 /// `axum` web server. Scraped metrics are rendered on-demand from atomic counter snapshots.
 pub fn start_metrics_server(
     config: MetricsConfig,
     stats_list: Vec<Arc<ThreadStats>>,
-) -> Option<MetricsServerHandle> {
+) -> std::io::Result<Option<MetricsServerHandle>> {
     if !config.enabled {
         tracing::info!("Prometheus metrics exporter disabled by configuration");
-        return None;
+        return Ok(None);
     }
 
     let port = config.port;
+    let addr = SocketAddr::from(([0, 0, 0, 0], port));
+    let listener = TcpListener::bind(addr)?;
+    listener.set_nonblocking(true)?;
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
     let start_time = Instant::now();
 
     std::thread::Builder::new()
         .name("custos-metrics".to_string())
         .spawn(move || {
-            let rt = match tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-            {
-                Ok(rt) => rt,
-                Err(e) => {
-                    tracing::error!("Failed to create tokio runtime for metrics server: {:?}", e);
-                    return;
-                }
-            };
-
             rt.block_on(async move {
                 let stats_for_metrics = stats_list.clone();
                 let app = Router::new()
@@ -579,42 +694,42 @@ pub fn start_metrics_server(
                             async move {
                                 let body = render_prometheus_metrics(&s, start_time);
                                 (
-                                    [(
-                                        CONTENT_TYPE,
-                                        "text/plain; version=0.0.4; charset=utf-8",
-                                    )],
+                                    [(CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")],
                                     body,
                                 )
                             }
                         }),
                     )
-                    .route(
-                        "/healthz",
-                        get(|| async { "OK" }),
-                    )
+                    .route("/healthz", get(|| async { "OK" }))
                     .route(
                         "/",
                         get(|| async { "Custos Prometheus Metrics Exporter: GET /metrics" }),
                     );
 
-                let addr = SocketAddr::from(([0, 0, 0, 0], port));
-                tracing::info!("Prometheus metrics endpoint listening on http://{}/metrics", addr);
+                tracing::info!(
+                    "Prometheus metrics endpoint listening on http://{}/metrics",
+                    addr
+                );
 
-                match tokio::net::TcpListener::bind(addr).await {
+                match tokio::net::TcpListener::from_std(listener) {
                     Ok(listener) => {
                         if let Err(err) = axum::serve(listener, app).await {
                             tracing::error!("Prometheus metrics HTTP server error: {:?}", err);
                         }
                     }
                     Err(e) => {
-                        tracing::error!("Failed to bind Prometheus metrics HTTP server to port {}: {:?}", port, e);
+                        tracing::error!(
+                            "Failed to start Prometheus metrics HTTP server on port {}: {:?}",
+                            port,
+                            e
+                        );
                     }
                 }
             });
         })
-        .ok()?;
+        .map(|_| ())?;
 
-    Some(MetricsServerHandle { port })
+    Ok(Some(MetricsServerHandle { port }))
 }
 
 #[cfg(test)]
@@ -658,11 +773,15 @@ mod tests {
         assert!(metrics_text.contains("custos_up 1"));
         assert!(metrics_text.contains("custos_rx_packets_total 300"));
         assert!(metrics_text.contains("custos_tx_packets_total 295"));
-        assert!(metrics_text.contains("custos_dropped_packets_total{reason=\"validation_failed\"} 5"));
+        assert!(
+            metrics_text.contains("custos_dropped_packets_total{reason=\"validation_failed\"} 5")
+        );
         assert!(metrics_text.contains("custos_core_rx_packets_total{core=\"0\"} 100"));
         assert!(metrics_text.contains("custos_core_rx_packets_total{core=\"1\"} 200"));
         assert!(metrics_text.contains("custos_protocol_packets_total{protocol=\"grpc\"} 95"));
         assert!(metrics_text.contains("custos_payload_bytes_bucket{le=\"1024\"} 1"));
-        assert!(metrics_text.contains("custos_processing_latency_seconds_bucket{le=\"0.000001\"} 1"));
+        assert!(
+            metrics_text.contains("custos_processing_latency_seconds_bucket{le=\"0.000001\"} 1")
+        );
     }
 }

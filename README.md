@@ -29,4 +29,4 @@ To run the full stack (Custos + Prometheus + Grafana):
 ```bash
 docker-compose up -d
 ```
-Access Grafana at `http://localhost:3000` (login: `admin` / `admin`).
+Access Prometheus at `http://localhost:9091` and Grafana at `http://localhost:3000` (login: `admin` / `admin`).

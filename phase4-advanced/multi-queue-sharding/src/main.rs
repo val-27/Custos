@@ -109,8 +109,12 @@ struct Args {
     force_zerocopy: bool,
 
     /// Enable Prometheus HTTP metrics endpoint (/metrics)
-    #[arg(long, default_value_t = true)]
+    #[arg(long, default_value_t = true, conflicts_with = "no_metrics")]
     metrics: bool,
+
+    /// Disable Prometheus HTTP metrics endpoint
+    #[arg(long)]
+    no_metrics: bool,
 
     /// Port for Prometheus HTTP metrics endpoint
     #[arg(long, default_value_t = 9090)]
@@ -250,11 +254,10 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     // Spawn Prometheus HTTP metrics server in a dedicated background thread
     let metrics_config = custos_common::MetricsConfig {
-        enabled: args.metrics,
+        enabled: args.metrics && !args.no_metrics,
         port: args.metrics_port,
     };
-    let _metrics_handle =
-        custos_common::start_metrics_server(metrics_config, stats_list.clone());
+    let _metrics_handle = custos_common::start_metrics_server(metrics_config, stats_list.clone())?;
 
     // 6. Main thread loops executing periodic stats aggregation and JSON metrics export
     let mut last_stats_time = Instant::now();
