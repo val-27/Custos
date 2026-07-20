@@ -4,15 +4,43 @@ services:
   custos:
     build: .
     image: custos-builder:latest
-    container_name: custos-phase1
+    container_name: custos-appliance
     network_mode: host
     privileged: true
     volumes:
       - .:/workspace
       - /dev:/dev
     working_dir: /workspace
-    # Default to forward mode on veth0, pinned to CPU core 0
-    command: ./target/release/custos-phase1-echo --interface veth0 --queue-id 0 --frame-count 2048 --mode forward --verbose
+    # Runs the Phase 4 multi-queue sharding daemon with Prometheus HTTP exporter on port 9090
+    command: ./target/release/custos-multi-queue-sharding --interface veth0 --queues 2 --frame-count 2048 --mode forward --metrics --metrics-port 9090 --verbose
+
+  prometheus:
+    image: prom/prometheus:v2.51.0
+    container_name: custos-prometheus
+    restart: unless-stopped
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./deploy/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    depends_on:
+      - custos
+
+  grafana:
+    image: grafana/grafana:10.4.0
+    container_name: custos-grafana
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - ./deploy/grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./deploy/grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./deploy/grafana/dashboard.json:/var/lib/grafana/dashboards/dashboard.json:ro
+    depends_on:
+      - prometheus
 
   hammer:
     build: .
@@ -23,7 +51,7 @@ services:
     volumes:
       - .:/workspace
     working_dir: /workspace
-    # Run the python script to hammer veth1
+    # Simulates continuous gRPC traffic on veth1
     command: python3 tests/hammer.py --interface veth1 --count 50000
     depends_on:
       - custos

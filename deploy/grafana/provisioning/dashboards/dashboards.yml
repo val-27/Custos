@@ -1,0 +1,11 @@
+apiVersion: 1
+
+providers:
+  - name: 'Custos Dashboards'
+    orgId: 1
+    folder: 'Custos Security Appliance'
+    type: file
+    disableDeletion: false
+    editable: true
+    options:
+      path: /var/lib/grafana/dashboards
