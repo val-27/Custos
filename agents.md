@@ -57,7 +57,7 @@ Welcome to the Custos codebase. As a high-performance network security appliance
 
 ## Directory & Sub-Crate Conventions
 
-- **Sub-Crates**: Each phase (`phase1-echo`, `phase2-grpc-basic`, `phase3-protobuf`, and phase 4 crates) must be an independent Cargo package with its own `Cargo.toml`.
+- **Sub-Crates**: Each phase (`phase1-echo`, `grpc-basic`, `protobuf`) must be an independent Cargo package with its own `Cargo.toml`.
 - **Self-Containment**: A developer should be able to navigate to any phase directory and compile/run it without building the entire workspace (e.g., `cd phase1-echo && cargo run`).
 - **Shared Code**: Put reusable logic, hardware/driver bindings, and helper modules in the `common/` sub-crate.
 
@@ -89,3 +89,4 @@ Welcome to the Custos codebase. As a high-performance network security appliance
   - Implement batch prefetching (`std::intrinsics::prefetch` or CPU prefetch instructions) of packet header cachelines during processing.
 - **Scale & Stress Testing**:
   - Run long-running performance tests using kernel packet generators (e.g., `pktgen`, `tcpreplay`, or hardware-based generators) to test under high-rate bursty conditions.
+

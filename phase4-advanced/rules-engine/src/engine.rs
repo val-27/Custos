@@ -316,12 +316,12 @@ pub fn walk_message_with_policy(
                     Ok(()) => {
                         *offset = sub_end;
                     }
-                    Err(err @ WalkError::Proto(ProtoError::RecursionLimit)) => {
+                    Err(err @ WalkError::DisallowedField(_)) => {
                         return Err(err);
                     }
                     Err(_) => {
-                        // On structural/policy parse errors inside speculative fields,
-                        // roll back and skip (the field is likely a normal string or byte array).
+                        // On structural parse errors, roll back and skip.
+                        // (The field is likely a normal string or byte array).
                         *offset = sub_end;
                     }
                 }
