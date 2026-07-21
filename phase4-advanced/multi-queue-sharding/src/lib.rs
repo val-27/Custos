@@ -6,97 +6,10 @@ use custos_protobuf::ValidationConfig;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
-/// Thread-local metrics structure, aligned to cache lines (64 bytes) to prevent false sharing.
-#[derive(Debug)]
-#[repr(align(64))]
-pub struct ThreadStats {
-    pub rx_packets: AtomicU64,
-    pub rx_bytes: AtomicU64,
-    pub tx_packets: AtomicU64,
-    pub tx_bytes: AtomicU64,
-    pub recycled_packets: AtomicU64,
-    pub drop_validation_failed: AtomicU64,
-
-    // Protocol counts
-    pub stat_ipv4: AtomicU64,
-    pub stat_tcp: AtomicU64,
-    pub stat_http2_data: AtomicU64,
-    pub stat_grpc: AtomicU64,
-    pub stat_protobuf: AtomicU64,
-
-    // Parser failures
-    pub err_too_small: AtomicU64,
-    pub err_non_ipv4: AtomicU64,
-    pub err_bad_ip_len: AtomicU64,
-    pub err_non_tcp: AtomicU64,
-    pub err_bad_ip_csum: AtomicU64,
-    pub err_bad_tcp_len: AtomicU64,
-    pub err_wrong_port: AtomicU64,
-    pub err_bad_http2: AtomicU64,
-    pub err_non_http2_data: AtomicU64,
-    pub err_bad_grpc: AtomicU64,
-    pub err_l4_overflow: AtomicU64,
-
-    // Anomalies
-    pub anomaly_invalid_varint: AtomicU64,
-    pub anomaly_invalid_wire_type: AtomicU64,
-    pub anomaly_recursion_limit: AtomicU64,
-    pub anomaly_buffer_underflow: AtomicU64,
-    pub anomaly_shape_dim_limit: AtomicU64,
-    pub anomaly_shape_val_invalid: AtomicU64,
-    pub anomaly_tensor_size_limit: AtomicU64,
-    pub anomaly_invalid_varint_bytes: AtomicU64,
-
-    // Payload size histogram
-    pub hist_payload_0_64: AtomicU64,
-    pub hist_payload_65_256: AtomicU64,
-    pub hist_payload_257_1024: AtomicU64,
-    pub hist_payload_1025_2048: AtomicU64,
-}
-
-impl Default for ThreadStats {
-    fn default() -> Self {
-        Self {
-            rx_packets: AtomicU64::new(0),
-            rx_bytes: AtomicU64::new(0),
-            tx_packets: AtomicU64::new(0),
-            tx_bytes: AtomicU64::new(0),
-            recycled_packets: AtomicU64::new(0),
-            drop_validation_failed: AtomicU64::new(0),
-            stat_ipv4: AtomicU64::new(0),
-            stat_tcp: AtomicU64::new(0),
-            stat_http2_data: AtomicU64::new(0),
-            stat_grpc: AtomicU64::new(0),
-            stat_protobuf: AtomicU64::new(0),
-            err_too_small: AtomicU64::new(0),
-            err_non_ipv4: AtomicU64::new(0),
-            err_bad_ip_len: AtomicU64::new(0),
-            err_non_tcp: AtomicU64::new(0),
-            err_bad_ip_csum: AtomicU64::new(0),
-            err_bad_tcp_len: AtomicU64::new(0),
-            err_wrong_port: AtomicU64::new(0),
-            err_bad_http2: AtomicU64::new(0),
-            err_non_http2_data: AtomicU64::new(0),
-            err_bad_grpc: AtomicU64::new(0),
-            err_l4_overflow: AtomicU64::new(0),
-            anomaly_invalid_varint: AtomicU64::new(0),
-            anomaly_invalid_wire_type: AtomicU64::new(0),
-            anomaly_recursion_limit: AtomicU64::new(0),
-            anomaly_buffer_underflow: AtomicU64::new(0),
-            anomaly_shape_dim_limit: AtomicU64::new(0),
-            anomaly_shape_val_invalid: AtomicU64::new(0),
-            anomaly_tensor_size_limit: AtomicU64::new(0),
-            anomaly_invalid_varint_bytes: AtomicU64::new(0),
-            hist_payload_0_64: AtomicU64::new(0),
-            hist_payload_65_256: AtomicU64::new(0),
-            hist_payload_257_1024: AtomicU64::new(0),
-            hist_payload_1025_2048: AtomicU64::new(0),
-        }
-    }
-}
+pub use custos_common::ThreadStats;
 
 /// Shared configuration containing the dynamically hot-swappable rules.
 pub struct SharedConfig {

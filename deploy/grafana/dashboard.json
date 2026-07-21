@@ -1,0 +1,255 @@
+{
+  "annotations": {
+    "list": []
+  },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "liveNow": false,
+  "panels": [
+    {
+      "title": "Packet Rate (RX / TX PPS)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "id": 1,
+      "targets": [
+        {
+          "expr": "custos_rx_pps",
+          "legendFormat": "RX PPS (Gauge)",
+          "refId": "A"
+        },
+        {
+          "expr": "custos_tx_pps",
+          "legendFormat": "TX PPS (Gauge)",
+          "refId": "B"
+        },
+        {
+          "expr": "rate(custos_rx_packets_total[30s])",
+          "legendFormat": "RX Rate (Derived)",
+          "refId": "C"
+        },
+        {
+          "expr": "rate(custos_tx_packets_total[30s])",
+          "legendFormat": "TX Rate (Derived)",
+          "refId": "D"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth"
+          },
+          "unit": "pps"
+        }
+      }
+    },
+    {
+      "title": "Network Throughput (MB/s)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "id": 2,
+      "targets": [
+        {
+          "expr": "custos_rx_bps / (1024 * 1024)",
+          "legendFormat": "RX Throughput (MB/s)",
+          "refId": "A"
+        },
+        {
+          "expr": "custos_tx_bps / (1024 * 1024)",
+          "legendFormat": "TX Throughput (MB/s)",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth"
+          },
+          "unit": "Bps"
+        }
+      }
+    },
+    {
+      "title": "Total Dropped Packets",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 8 },
+      "id": 3,
+      "targets": [
+        {
+          "expr": "sum(custos_dropped_packets_total)",
+          "legendFormat": "Dropped Packets",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 1 },
+              { "color": "red", "value": 100 }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "title": "Recycled Frames",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 8 },
+      "id": 4,
+      "targets": [
+        {
+          "expr": "custos_recycled_packets_total",
+          "legendFormat": "Recycled Frames",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "title": "Appliance Status",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 8 },
+      "id": 5,
+      "targets": [
+        {
+          "expr": "custos_up",
+          "legendFormat": "Custos Engine",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "green", "value": 1 }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "title": "Uptime (Seconds)",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 8 },
+      "id": 6,
+      "targets": [
+        {
+          "expr": "custos_uptime_seconds",
+          "legendFormat": "Uptime",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        }
+      }
+    },
+    {
+      "title": "Inspected Protocol Packets",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 12 },
+      "id": 7,
+      "targets": [
+        {
+          "expr": "custos_protocol_packets_total",
+          "legendFormat": "{{protocol}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "title": "Per-Core RX Packets Rate",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 12 },
+      "id": 8,
+      "targets": [
+        {
+          "expr": "rate(custos_core_rx_packets_total[30s])",
+          "legendFormat": "Core {{core}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "pps"
+        }
+      }
+    },
+    {
+      "title": "L2-L5 Parser Failure Breakdown",
+      "type": "barplot",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 20 },
+      "id": 9,
+      "targets": [
+        {
+          "expr": "custos_parser_errors_total",
+          "legendFormat": "{{reason}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "title": "Protobuf Wire-Format Anomalies",
+      "type": "barplot",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 20 },
+      "id": 10,
+      "targets": [
+        {
+          "expr": "custos_anomalies_total",
+          "legendFormat": "{{type}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "title": "Processing Latency Histogram",
+      "type": "histogram",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 28 },
+      "id": 11,
+      "targets": [
+        {
+          "expr": "custos_processing_latency_seconds_bucket",
+          "legendFormat": "le={{le}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "title": "Payload Size Histogram (Bytes)",
+      "type": "histogram",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 28 },
+      "id": 12,
+      "targets": [
+        {
+          "expr": "custos_payload_bytes_bucket",
+          "legendFormat": "le={{le}}",
+          "refId": "A"
+        }
+      ]
+    }
+  ],
+  "refresh": "5s",
+  "schemaVersion": 38,
+  "style": "dark",
+  "tags": ["custos", "af_xdp", "prometheus", "security"],
+  "time": {
+    "from": "now-15m",
+    "to": "now"
+  },
+  "timepicker": {
+    "refresh_intervals": ["1s", "5s", "10s", "30s"]
+  },
+  "title": "Custos Security Appliance - Prometheus Dashboard",
+  "uid": "custos-prometheus-dashboard"
+}

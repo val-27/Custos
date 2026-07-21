@@ -103,7 +103,9 @@ See [`k8s-integration/README.md`](k8s-integration/README.md) for the authoritati
 | **Latency (p99)** | < 15 microseconds | < 8 microseconds |
 
 ### Monitoring Setup
-The multi-queue sharding daemon exports aggregated JSON metrics to `/tmp/custos_metrics.json`; see [`multi-queue-sharding/README.md`](multi-queue-sharding/README.md) for daemon-specific monitoring details.
+Custos exports Prometheus metrics on an HTTP endpoint (`/metrics`) running on an isolated background thread with **zero impact on the fast packet path**. It exposes per-core PPS, throughput, drop reasons, L2-L5 parser guards, Protobuf anomaly counters, processing latency histograms, and payload size distributions.
+
+For complete scrape configuration, Grafana dashboard JSON, and Docker Compose deployment instructions, see [`docs/prometheus-grafana.md`](../docs/prometheus-grafana.md).
 
 ---
 

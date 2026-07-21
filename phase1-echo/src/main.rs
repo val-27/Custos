@@ -4,12 +4,6 @@
 //! processes them (either dropping them or swapping MAC addresses for echo),
 //! and submits them to the Tx ring. Employs zero heap allocations in the hot path.
 
-#[cfg(not(target_os = "linux"))]
-fn main() {
-    eprintln!("custos-phase1-echo requires Linux AF_XDP support");
-    std::process::exit(1);
-}
-
 #[cfg(target_os = "linux")]
 use clap::Parser;
 #[cfg(target_os = "linux")]

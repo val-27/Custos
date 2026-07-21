@@ -8,3 +8,5 @@ libc = { workspace = true }
 zerocopy = { workspace = true }
 bytemuck = { workspace = true }
 tracing = { workspace = true }
+axum = "0.7"
+tokio = { version = "1.38", features = ["rt-multi-thread", "net", "macros"] }

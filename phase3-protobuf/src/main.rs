@@ -3,12 +3,6 @@
 //! Validates Ethernet, IPv4, TCP, HTTP/2, gRPC, and Protobuf layers zero-copy.
 //! Configures rules via TOML, exports Prometheus/JSON metrics, and runs with zero heap allocations in the hot path.
 
-#[cfg(not(target_os = "linux"))]
-fn main() {
-    eprintln!("custos-phase3-protobuf requires Linux AF_XDP support");
-    std::process::exit(1);
-}
-
 #[cfg(target_os = "linux")]
 use clap::Parser;
 #[cfg(target_os = "linux")]

@@ -4,22 +4,34 @@ Project Custos is a high-performance, user-space network security appliance buil
 
 ## Directory Structure
 
-- [common/](common/) - Shared utility libraries, including core affinity settings.
-- [phase1-echo/](phase1-echo/) - Phase 1: A single-core loop that receives and drops, forwards, or echoes Ethernet packets over AF_XDP.
-- [grpc-basic/](grpc-basic/) - Phase 2 scaffold for HTTP/2 and gRPC validation.
-- [protobuf/](protobuf/) - Phase 3 scaffold for Protobuf tag walking and security guards.
+- [common/](common/) - Shared utility libraries, thread pinning, and Prometheus HTTP metrics exporter.
+- [phase1-echo/](phase1-echo/) - Phase 1: Single-core AF_XDP loop.
+- [phase2-grpc-basic/](phase2-grpc-basic/) - Phase 2: Basic HTTP/2 & gRPC validation.
+- [phase3-protobuf/](phase3-protobuf/) - Phase 3: Protobuf wire-format parser & shape validation rules.
+- [phase4-advanced/](phase4-advanced/) - Phase 4: Multi-queue sharding daemon, Kubernetes integration, rules engine, and TX optimizations.
+- [docs/prometheus-grafana.md](docs/prometheus-grafana.md) - Prometheus metrics exposition and Grafana setup guide.
 - [tests/](tests/) - Integration, validation, and performance test suites.
-- [agents.md](agents.md) - Guidelines and coding conventions for coding agents.
+- [AGENTS.md](AGENTS.md) - Guidelines and coding conventions for coding agents.
 
 ## Build and Run
 
-To compile the entire workspace:
+To compile the base workspace:
 ```bash
 cargo build --release
 ```
 
-To run a specific sub-crate (e.g., the Phase 1 Echo daemon):
+To compile the Phase 4 multi-queue sharding daemon:
 ```bash
-cd phase1-echo
-cargo run --release -- --interface eth0 --core 1
+cargo build --release --manifest-path phase4-advanced/Cargo.toml --target-dir target
 ```
+
+To run Phase 4 multi-queue sharding daemon with Prometheus metrics enabled (`http://localhost:9090/metrics`):
+```bash
+./target/release/custos-multi-queue-sharding --interface veth0 --queues 2 --metrics --metrics-port 9090
+```
+
+To run the full stack (Custos + Prometheus + Grafana):
+```bash
+docker-compose up -d
+```
+Access Prometheus at `http://localhost:9091` and Grafana at `http://localhost:3000` (login: `admin` / `admin`).

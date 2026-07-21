@@ -6,6 +6,12 @@
 
 use std::io;
 
+pub mod metrics;
+pub use metrics::{
+    render_prometheus_metrics, start_metrics_server, MetricsConfig, MetricsServerHandle,
+    ThreadStats,
+};
+
 // ---------------------------------------------------------------------------
 // UMEM layout constants
 // ---------------------------------------------------------------------------

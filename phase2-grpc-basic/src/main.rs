@@ -4,12 +4,6 @@
 //! Pins polling thread to a single core, avoids heap allocations in the hot path,
 //! tracks detailed packet types and validation failures, and supports simulated drop rates.
 
-#[cfg(not(target_os = "linux"))]
-fn main() {
-    eprintln!("custos-phase2-grpc-basic requires Linux AF_XDP support");
-    std::process::exit(1);
-}
-
 #[cfg(target_os = "linux")]
 use clap::Parser;
 #[cfg(target_os = "linux")]
