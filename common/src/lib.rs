@@ -12,6 +12,11 @@ pub use metrics::{
     ThreadStats,
 };
 
+#[cfg(target_os = "linux")]
+pub mod socket;
+#[cfg(target_os = "linux")]
+pub use socket::{build_socket_config, build_umem, populate_fill_queue};
+
 // ---------------------------------------------------------------------------
 // UMEM layout constants
 // ---------------------------------------------------------------------------
@@ -37,7 +42,12 @@ pub const UMEM_RING_SIZE: u32 = 2048;
 ///
 /// Parsed from the `--mode` CLI argument on startup and stored as a compact
 /// enum so that hot-path comparisons are integer checks, not string scans.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// Serializes to/from lowercase strings (`"drop"`, `"forward"`, `"echo"`) in
+/// JSON and TOML configuration, matching the [`Display`](std::fmt::Display) and
+/// [`FromStr`](std::str::FromStr) representations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum OperationMode {
     /// Drop every received packet immediately, recycling frames back to
     /// the Fill ring. Used for performance baseline / traffic absorption.

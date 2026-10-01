@@ -7,6 +7,7 @@
 //! and runs the high-performance packet processing loop zero-copy.
 
 use clap::Parser;
+use custos_common::OperationMode;
 use custos_k8s_integration::{recv_fds, WorkerConfig};
 use std::error::Error;
 use std::io::{self, Read};
@@ -30,9 +31,9 @@ pub struct Args {
     #[arg(short, long, default_value_t = 1)]
     pub core: usize,
 
-    /// Operation mode: "forward" or "echo"
-    #[arg(short, long, default_value = "forward")]
-    pub mode: String,
+    /// Packet processing mode.
+    #[arg(short, long, default_value_t = OperationMode::Forward)]
+    pub mode: OperationMode,
 
     /// Enable verbose logging (level DEBUG)
     #[arg(short, long)]
@@ -295,7 +296,7 @@ mod linux {
                         }
                         drop_packets += 1;
                     } else {
-                        if args.mode == "echo" {
+                        if args.mode == OperationMode::Echo {
                             // Swap source and destination MACs in-place
                             // SAFETY: We have exclusive access to the packet payload slice.
                             let contents = unsafe {

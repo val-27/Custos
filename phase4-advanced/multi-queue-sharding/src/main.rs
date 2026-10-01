@@ -7,6 +7,8 @@
 #[cfg(target_os = "linux")]
 use clap::Parser;
 #[cfg(target_os = "linux")]
+use custos_common::OperationMode;
+#[cfg(target_os = "linux")]
 use custos_grpc_basic::ParseError;
 #[cfg(target_os = "linux")]
 use custos_multi_queue_sharding::{
@@ -84,9 +86,9 @@ struct Args {
     #[arg(short, long, default_value_t = 2048)]
     frame_count: u32,
 
-    /// Operation mode: "forward" (validate & forward) or "echo" (validate & swap MACs)
-    #[arg(short, long, default_value = "forward", value_parser = ["forward", "echo"])]
-    mode: String,
+    /// Packet processing mode.
+    #[arg(short, long, default_value_t = OperationMode::Forward)]
+    mode: OperationMode,
 
     /// Config file path (TOML) for validation rules
     #[arg(long)]
@@ -315,7 +317,7 @@ fn run_worker(
     core_id: usize,
     interface: String,
     frame_count: u32,
-    mode: String,
+    mode: OperationMode,
     shared_config: Arc<SharedConfig>,
     thread_stats: Arc<ThreadStats>,
     force_copy: bool,
@@ -330,51 +332,9 @@ fn run_worker(
     let frame_count_nonzero =
         NonZeroU32::new(frame_count).ok_or("Frame count must be non-zero and a power of two")?;
 
-    // C. Initialize dedicated UMEM slice (allocated independently per queue)
-    let umem_config = UmemConfigBuilder::new()
-        .frame_size(2048.try_into().unwrap())
-        .frame_headroom(0.try_into().unwrap())
-        .fill_queue_size(frame_count_nonzero)
-        .comp_queue_size(frame_count_nonzero)
-        .build()
-        .map_err(|e| {
-            error!("[Queue {}] Failed to build UmemConfig: {:?}", queue_id, e);
-            e
-        })?;
-
-    let use_huge_pages = false;
-    let (umem, frame_descs) =
-        Umem::new(umem_config, frame_count_nonzero, use_huge_pages).map_err(|e| {
-            error!("[Queue {}] Failed to initialize UMEM: {:?}", queue_id, e);
-            e
-        })?;
-    info!(
-        "[Queue {}] Initialized dedicated UMEM with {} frames",
-        queue_id, frame_count
-    );
-
-    // D. Configure AF_XDP socket
-    let mut socket_config_builder = SocketConfig::builder();
-    let mut bind_flags = BindFlags::XDP_USE_NEED_WAKEUP;
-    if force_copy {
-        bind_flags.insert(BindFlags::XDP_COPY);
-        info!("[Queue {}] Forcing XDP_COPY mode", queue_id);
-    } else if force_zerocopy {
-        bind_flags.insert(BindFlags::XDP_ZEROCOPY);
-        info!("[Queue {}] Forcing XDP_ZEROCOPY mode", queue_id);
-    }
-    socket_config_builder.bind_flags(bind_flags);
-
-    // If queue_id > 0, inhibit default program load to prevent double-attachment conflicts on the interface
-    if queue_id > 0 {
-        use xsk_rs::config::LibxdpFlags;
-        socket_config_builder.libxdp_flags(LibxdpFlags::XSK_LIBXDP_FLAGS_INHIBIT_PROG_LOAD);
-        info!(
-            "[Queue {}] Inhibiting XDP program load to prevent double-attachment conflicts",
-            queue_id
-        );
-    }
-    let socket_config = socket_config_builder.build();
+    // C. Initialize dedicated UMEM slice & AF_XDP socket
+    let (umem, frame_descs) = custos_common::build_umem(frame_count_nonzero, frame_count_nonzero, false)?;
+    let socket_config = custos_common::build_socket_config(force_copy, force_zerocopy, queue_id > 0);
 
     // SAFETY: Creating a dedicated AF_XDP Socket bound to the interface and queue ID.
     // The UMEM reference is held for the lifetime of this socket.
@@ -391,22 +351,9 @@ fn run_worker(
         queue_id, interface, queue_id
     );
 
-    // E. Populate Fill Queue with all pre-allocated descriptors
     // SAFETY: Populating the Fill Queue with all owned frame descriptors before polling.
-    let produced = unsafe { fq.produce(&frame_descs) };
-    if produced != frame_descs.len() {
-        return Err(format!(
-            "[Queue {}] Failed to populate Fill Queue: produced {} out of {} frames",
-            queue_id,
-            produced,
-            frame_descs.len()
-        )
-        .into());
-    }
-    info!(
-        "[Queue {}] Populated Fill Queue with all {} frames",
-        queue_id, produced
-    );
+    unsafe { custos_common::populate_fill_queue(&mut fq, &frame_descs)? };
+
 
     // F. Start Hot Polling Loop
     run_packet_loop(
@@ -431,7 +378,7 @@ fn run_worker(
 #[cfg(target_os = "linux")]
 fn run_packet_loop(
     queue_id: u32,
-    mode: String,
+    mode: OperationMode,
     verbose: bool,
     umem: Umem,
     mut rx_q: xsk_rs::RxQueue,
@@ -529,7 +476,7 @@ fn run_packet_loop(
                         }
 
                         // Echo mode: Swap MAC address in place
-                        if mode == "echo" {
+                        if mode == OperationMode::Echo {
                             // SAFETY: Modifying packet memory within bounds of the allocated UMEM frame descriptor.
                             let mut data_mut = unsafe { umem.data_mut(desc) };
                             let contents = data_mut.contents_mut();

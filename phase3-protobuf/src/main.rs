@@ -158,54 +158,16 @@ fn main() -> Result<(), Box<dyn Error>> {
         e
     })?;
 
-    // 4. UMEM Configuration (2 KiB frames, ring sizes from shared constants)
-    //
-    // The NonZeroU32 conversions use expect() rather than unwrap() so that a
-    // misconfigured constant produces a descriptive panic message during startup
-    // (not in the hot path). UMEM_FRAME_SIZE and UMEM_RING_SIZE are guaranteed
-    // non-zero by their definitions in custos-common.
-    let frame_size_nz = std::num::NonZeroU32::new(custos_common::UMEM_FRAME_SIZE)
-        .expect("UMEM_FRAME_SIZE must be non-zero");
-    let ring_size_nz = std::num::NonZeroU32::new(custos_common::UMEM_RING_SIZE)
+    // 4. UMEM & Socket Configuration
+    let frame_count_nz = NonZeroU32::new(args.frame_count)
+        .ok_or("Frame count must be non-zero and a power of two")?;
+    let ring_size_nz = NonZeroU32::new(custos_common::UMEM_RING_SIZE)
         .expect("UMEM_RING_SIZE must be non-zero");
 
-    let umem_config = UmemConfigBuilder::new()
-        .frame_size(frame_size_nz)
-        .frame_headroom(0)
-        .fill_queue_size(ring_size_nz)
-        .comp_queue_size(ring_size_nz)
-        .build()
-        .map_err(|e| {
-            error!("Failed to build UmemConfig: {:?}", e);
-            e
-        })?;
+    let (umem, frame_descs) = custos_common::build_umem(frame_count_nz, ring_size_nz, false)?;
+    let socket_config = custos_common::build_socket_config(args.force_copy, args.force_zerocopy, false);
 
-    let use_huge_pages = false;
-    let frame_count_nonzero = NonZeroU32::new(args.frame_count)
-        .ok_or("Frame count must be non-zero and a power of two")?;
-
-    let (umem, frame_descs) =
-        Umem::new(umem_config, frame_count_nonzero, use_huge_pages).map_err(|e| {
-            error!("Failed to initialize UMEM: {:?}", e);
-            e
-        })?;
-    info!(
-        "Initialized UMEM with {} frames (2KB size)",
-        args.frame_count
-    );
-
-    // 5. Socket Configuration
-    let mut socket_config_builder = SocketConfig::builder();
-    let mut bind_flags = BindFlags::XDP_USE_NEED_WAKEUP;
-    if args.force_copy {
-        bind_flags.insert(BindFlags::XDP_COPY);
-        info!("Forcing copy-mode (XDP_COPY)");
-    } else if args.force_zerocopy {
-        bind_flags.insert(BindFlags::XDP_ZEROCOPY);
-        info!("Forcing zero-copy mode (XDP_ZEROCOPY)");
-    }
-    let socket_config = socket_config_builder.bind_flags(bind_flags).build();
-
+    // SAFETY: Creating an AF_XDP socket bound to interface and queue ID using initialized UMEM.
     let (tx_q, rx_q, fq_and_cq) =
         unsafe { Socket::new(socket_config, &umem, &if_name, args.queue_id) }.map_err(|e| {
             error!("Failed to initialize AF_XDP socket: {:?}", e);
@@ -218,17 +180,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         args.interface, args.queue_id
     );
 
-    // 6. Populate Fill Queue with all available UMEM frames
-    let produced = unsafe { fq.produce(&frame_descs) };
-    if produced != frame_descs.len() {
-        return Err(format!(
-            "Failed to populate Fill Queue: produced {} out of {} frames",
-            produced,
-            frame_descs.len()
-        )
-        .into());
-    }
-    info!("Populated Fill Queue with all {} frames", produced);
+    // SAFETY: Initializing the Fill Queue with pre-allocated frame descriptors at startup.
+    unsafe { custos_common::populate_fill_queue(&mut fq, &frame_descs)? };
+
 
     // 7. Packet Processing Loop
     run_packet_loop(args, config, umem, rx_q, tx_q, fq, cq, frame_descs[0])?;

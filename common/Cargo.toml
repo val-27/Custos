@@ -3,10 +3,14 @@ name = "custos-common"
 version = "0.1.0"
 edition = "2021"
 
+[target.'cfg(target_os = "linux")'.dependencies]
+xsk-rs = { workspace = true }
+
 [dependencies]
 libc = { workspace = true }
 zerocopy = { workspace = true }
 bytemuck = { workspace = true }
 tracing = { workspace = true }
+serde = { workspace = true }
 axum = "0.7"
 tokio = { version = "1.38", features = ["rt-multi-thread", "net", "macros"] }

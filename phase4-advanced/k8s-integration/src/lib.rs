@@ -4,23 +4,84 @@
 //! Provides utilities for transferring file descriptors (socket and memfd) from the
 //! privileged daemon to the unprivileged worker.
 
-use std::io::{self, Read};
-use std::os::unix::io::AsRawFd;
-use std::os::unix::io::RawFd;
+use std::io::{self, BufRead, BufReader};
+use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::net::UnixStream;
 
+use custos_common::OperationMode;
+
 /// Configuration passed from the daemon to the worker over UDS.
+///
+/// Serialized as JSON and transmitted newline-delimited over the Unix domain socket
+/// before the `SCM_RIGHTS` ancillary message carrying the AF_XDP socket fd.
+///
+/// # Field Notes
+/// - `mode`: one of `"forward"` or `"echo"`. Must match a valid [`custos_common::OperationMode`].
+/// - `queue_id`: the NIC hardware queue to bind the AF_XDP socket to.
+/// - `target_port`: destination TCP port used by the protobuf validation filter.
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
 pub struct WorkerConfig {
+    /// Number of UMEM frames (must be a power of two).
     pub frame_count: u32,
+    /// Size of each UMEM frame in bytes (typically 2048).
     pub frame_size: u32,
+    /// Number of entries in the RX ring.
     pub rx_size: u32,
+    /// Number of entries in the TX ring.
     pub tx_size: u32,
+    /// Number of entries in the Fill ring.
     pub fill_size: u32,
+    /// Number of entries in the Completion ring.
     pub comp_size: u32,
+    /// NIC hardware queue index.
     pub queue_id: u32,
-    pub mode: String,
+    /// Packet processing mode.
+    pub mode: OperationMode,
+    /// Target TCP destination port for gRPC validation.
     pub target_port: u16,
+}
+
+/// Errors that can occur during K8s daemon↔worker socket handshake.
+#[derive(Debug)]
+pub enum K8sError {
+    /// Failed to connect or perform I/O on the Unix domain socket.
+    Io(io::Error),
+    /// The worker config JSON received from the daemon could not be parsed.
+    ConfigParse(serde_json::Error),
+    /// The `SCM_RIGHTS` message was received but contained no file descriptors.
+    NoFdsReceived,
+}
+
+impl std::fmt::Display for K8sError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Io(e) => write!(f, "Unix socket I/O error: {}", e),
+            Self::ConfigParse(e) => write!(f, "Worker config parse error: {}", e),
+            Self::NoFdsReceived => write!(f, "SCM_RIGHTS message contained no file descriptors"),
+        }
+    }
+}
+
+impl std::error::Error for K8sError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Io(e) => Some(e),
+            Self::ConfigParse(e) => Some(e),
+            Self::NoFdsReceived => None,
+        }
+    }
+}
+
+impl From<io::Error> for K8sError {
+    fn from(e: io::Error) -> Self {
+        Self::Io(e)
+    }
+}
+
+impl From<serde_json::Error> for K8sError {
+    fn from(e: serde_json::Error) -> Self {
+        Self::ConfigParse(e)
+    }
 }
 
 /// Sends a list of file descriptors over a Unix domain socket using `SCM_RIGHTS`.
@@ -152,36 +213,73 @@ pub fn recv_fds(stream: &UnixStream, fds: &mut [RawFd]) -> io::Result<usize> {
     }
 }
 
-/// Receives an AF_XDP socket file descriptor over SCM_RIGHTS (compatible with the skeleton design).
-pub fn receive_socket_fd(socket_path: &str) -> Result<std::os::unix::io::RawFd, String> {
+/// Receives an AF_XDP socket file descriptor over `SCM_RIGHTS` and wraps it in an [`OwnedFd`].
+///
+/// # Purpose
+/// Called by the unprivileged worker to inherit the bound AF_XDP socket descriptor
+/// sent by the privileged daemon. The returned [`OwnedFd`] guarantees the fd is
+/// closed when it goes out of scope, preventing descriptor leaks.
+///
+/// # Errors
+/// - [`K8sError::Io`] — I/O failure on the Unix socket (connect, read, or `recvmsg`).
+/// - [`K8sError::ConfigParse`] — The JSON `WorkerConfig` line could not be deserialized.
+/// - [`K8sError::NoFdsReceived`] — The `SCM_RIGHTS` message contained zero file descriptors.
+///
+/// # Safety Invariants
+/// The function receives raw `RawFd` integers from the kernel via `SCM_RIGHTS` and
+/// immediately wraps the first one in `OwnedFd` so that Rust owns its lifetime.
+/// Any additional fds beyond the first are closed explicitly to prevent leaks.
+pub fn receive_socket_fd(socket_path: &str) -> Result<(OwnedFd, WorkerConfig), K8sError> {
     tracing::info!("Connecting to UNIX socket at: {}", socket_path);
-    let mut stream = UnixStream::connect(socket_path)
-        .map_err(|e| format!("Failed to connect to Unix socket: {}", e))?;
-    let mut config_line = String::new();
-    let mut byte = [0u8; 1];
-    while byte[0] != b'\n' {
-        stream
-            .read_exact(&mut byte)
-            .map_err(|e| format!("Failed to receive worker configuration: {}", e))?;
-        config_line.push(byte[0] as char);
-    }
-    serde_json::from_str::<WorkerConfig>(&config_line)
-        .map_err(|e| format!("Failed to parse worker configuration: {}", e))?;
+    let stream = UnixStream::connect(socket_path)?;
 
-    let mut fds = [0; 2];
-    let count = recv_fds(&stream, &mut fds)
-        .map_err(|e| format!("Failed to receive file descriptors: {}", e))?;
+    // Read the newline-delimited JSON WorkerConfig using a buffered reader.
+    // BufReader::read_line is efficient (buffers internally) and handles multi-byte UTF-8
+    // correctly, unlike the previous byte-by-byte loop with `as char` truncation.
+    let mut config_line = String::new();
+    {
+        let mut reader = BufReader::new(&stream);
+        reader.read_line(&mut config_line)?;
+    }
+    let config: WorkerConfig = serde_json::from_str(config_line.trim_end())?;
+    tracing::debug!("Received worker config: {:?}", config);
+
+    // Receive up to 2 fds (daemon may send socket fd + optional memfd).
+    let mut raw_fds: [RawFd; 2] = [-1; 2];
+    let count = recv_fds(&stream, &mut raw_fds)?;
 
     if count == 0 {
-        return Err("No file descriptors received".to_string());
+        return Err(K8sError::NoFdsReceived);
+    }
+
+    // SAFETY: The kernel guarantees that each RawFd in raw_fds[0..count] is a valid,
+    // open file descriptor owned by this process as of the recvmsg call. Wrapping in
+    // OwnedFd transfers that ownership to Rust, which will close it on drop.
+    let socket_fd = unsafe { OwnedFd::from_raw_fd(raw_fds[0]) };
+
+    // Explicitly close any additional fds received beyond the first to avoid leaks.
+    // The daemon may send a second fd (e.g. memfd for UMEM) that this simplified
+    // receiver does not use. Dropping them here prevents fd exhaustion.
+    for &extra_fd in &raw_fds[1..count] {
+        // SAFETY: extra_fd is a valid open fd received via SCM_RIGHTS and not yet owned
+        // by any Rust type. We close it directly to release the kernel resource.
+        let ret = unsafe { libc::close(extra_fd) };
+        if ret != 0 {
+            tracing::warn!(
+                "Failed to close extra received fd {}: {}",
+                extra_fd,
+                io::Error::last_os_error()
+            );
+        }
     }
 
     tracing::info!(
-        "Successfully received {} file descriptors over UDS SCM_RIGHTS",
+        "Successfully received {} file descriptor(s) over UDS SCM_RIGHTS",
         count
     );
-    Ok(fds[0])
+    Ok((socket_fd, config))
 }
+
 
 #[cfg(test)]
 mod tests {

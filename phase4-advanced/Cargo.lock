@@ -295,8 +295,10 @@ dependencies = [
  "axum",
  "bytemuck",
  "libc",
+ "serde",
  "tokio",
  "tracing",
+ "xsk-rs",
  "zerocopy",
 ]
 
